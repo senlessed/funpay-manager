@@ -466,3 +466,100 @@ async def test_schema_three_upgrade_rollback_preserves_old_database(tmp_path, mo
         assert "partial" not in {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
     monkeypatch.setattr(database, "MIGRATION_4", migration)
     await LocalStorage(path).migrate()
+
+
+@pytest.mark.parametrize("state", ["absent", "expired", "cancelled", "basic_group", "bad_code"])
+async def test_pairing_feedback_is_private_safe_and_throttled(tmp_path, state):
+    storage, _, _, _, _, client, _ = await setup(tmp_path, bound=False)
+    pairing = GroupPairing(storage, asyncio.Event())
+    code = await pairing.begin() if state != "absent" else "test-only-inactive-code"
+    msg = group_message("/bindgroup@test_bot " + code)
+    if state == "expired":
+        pairing.challenge.expires = 0
+    elif state == "cancelled":
+        pairing.cancel()
+    elif state == "basic_group":
+        msg.chat.type = "group"
+    elif state == "bad_code":
+        msg.text = "/bindgroup@test_bot wrong-test-code"
+    assert await pairing.handle(client, msg)
+    assert await pairing.handle(client, msg)
+    assert await storage.get_setting("telegram_group") is None
+    client.send_message.assert_awaited_once()
+    call = client.send_message.await_args
+    assert call.args[0] == 7
+    assert code not in call.args[1] and "wrong-test-code" not in call.args[1]
+    assert call.kwargs["parse_mode"] is None
+    client.get_chat.assert_not_awaited()
+
+
+async def test_pairing_does_not_reply_to_foreign_anon_forwarded_or_other_bot_command(tmp_path):
+    storage, _, _, _, _, client, _ = await setup(tmp_path, bound=False)
+    pairing = GroupPairing(storage, asyncio.Event())
+    code = await pairing.begin()
+    foreign = group_message("/bindgroup@test_bot " + code, user=8)
+    anonymous = group_message("/bindgroup@test_bot " + code, sender_chat=NS(id=-100111))
+    forwarded = group_message("/bindgroup@test_bot " + code)
+    forwarded.forward_origin = NS(type="user")
+    for msg in (foreign, anonymous, forwarded, group_message("/bindgroup@other_bot " + code)):
+        assert await pairing.handle(client, msg)
+    client.send_message.assert_not_awaited()
+    client.get_chat.assert_not_awaited()
+    assert pairing.challenge.active
+
+
+async def test_pairing_success_survives_failure_of_private_confirmation(tmp_path):
+    storage, _, _, _, _, client, _ = await setup(tmp_path, bound=False)
+    pairing = GroupPairing(storage, asyncio.Event())
+    code = await pairing.begin()
+    client.send_message.side_effect = TimeoutError
+    assert await pairing.handle(client, group_message("/bindgroup@TEST_BOT " + code))
+    assert await storage.get_setting("telegram_group")
+    assert pairing.error is None
+    assert all(call.args[0] == 7 for call in client.send_message.await_args_list)
+
+
+async def test_real_dispatcher_routes_addressed_group_command_to_pairing(tmp_path):
+    from aiogram import Bot
+    from aiogram.types import Update
+
+    from funpay_manager.telegram.service import TelegramBotService
+
+    storage, _, _, _, manager, mock, _ = await setup(tmp_path, bound=False)
+    pairing = GroupPairing(storage, asyncio.Event())
+    code = await pairing.begin()
+    client = Bot(token="77:test-only-token")
+    client.get_chat = mock.get_chat
+    client.get_chat_member = mock.get_chat_member
+    client.send_message = mock.send_message
+    handler = TelegramBotService(
+        await storage.get_setting("telegram_binding"),
+        "test-only-token",
+        AsyncMock(),
+        lambda _: None,
+        storage=storage,
+        topics=manager,
+        group_pairing=pairing,
+    )
+    handler.bot = client
+    command = "/bindgroup@test_bot"
+    update = Update.model_validate(
+        {
+            "update_id": 100,
+            "message": {
+                "message_id": 10,
+                "date": 0,
+                "chat": {"id": -100111, "type": "supergroup", "title": "test", "is_forum": True},
+                "from": {"id": 7, "is_bot": False, "first_name": "test"},
+                "text": command + " " + code,
+                "entities": [{"type": "bot_command", "offset": 0, "length": len(command)}],
+            },
+        }
+    )
+    try:
+        await handler.dispatcher.feed_update(client, update)
+        assert await storage.get_setting("telegram_group")
+        assert "привязана" in mock.send_message.await_args.args[1]
+        assert all(call.args[0] == 7 for call in mock.send_message.await_args_list)
+    finally:
+        await client.session.close()

@@ -59,7 +59,7 @@ class TelegramBotService:
         )
 
     async def message(self, message, event_update=None):
-        if message.chat.type == "supergroup" and self.topics:
+        if message.chat.type in ("group", "supergroup") and self.topics:
             if (
                 not message.from_user
                 or message.from_user.is_bot
@@ -69,6 +69,8 @@ class TelegramBotService:
                 return
             try:
                 if self.group_pairing and await self.group_pairing.handle(self.bot, message):
+                    return
+                if message.chat.type != "supergroup":
                     return
                 group = await self.storage.get_setting("telegram_group")
                 if not group or group["group_id"] != message.chat.id:

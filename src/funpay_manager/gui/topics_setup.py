@@ -11,6 +11,7 @@ class TopicsSetupDialog(QDialog):
         self.prefix = "topics-setup-" + uuid4().hex
         self.closed = False
         self.polling = False
+        self.command = ""
         self.setWindowTitle("Telegram Topics · закрытая группа")
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumSize(580, 520)
@@ -20,6 +21,7 @@ class TopicsSetupDialog(QDialog):
             "Создайте отдельную закрытую супергруппу, включите темы и добавьте вашего бота.\n"
             "Назначьте бота администратором с правом управления темами;\n"
             "привязанный владелец Telegram тоже должен быть администратором группы.\n"
+            "Отправляйте команду от себя: анонимность администратора должна быть выключена.\n"
             "У группы не должно быть публичного username и связанного канала.\n\n"
             "Все участники группы смогут читать переписки всех покупателей.\n"
             "Темы не изолируют доступ. Отвечать в FunPay сможет только привязанный владелец.\n"
@@ -51,7 +53,13 @@ class TopicsSetupDialog(QDialog):
 
     def start(self):
         self.begin.setEnabled(False)
-        self.backend.submit(self.prefix + "-begin", self.services.group_pairing.begin)
+
+        async def begin():
+            pairing = self.services.group_pairing
+            code = await pairing.begin()
+            return {"code": code, "username": pairing.snapshot[0]["username"]}
+
+        self.backend.submit(self.prefix + "-begin", begin)
 
     def poll(self):
         if self.polling or self.closed:
@@ -72,10 +80,14 @@ class TopicsSetupDialog(QDialog):
         if self.closed:
             return
         if name == self.prefix + "-begin":
+            self.command = f"/bindgroup@{result['username']} {result['code']}"
             self.status.setText(
                 "Отправьте в течение 5 минут от привязанного владельца\n"
                 "обычным сообщением в подготовленной закрытой группе:\n\n"
-                f"/bindgroup {result}\n\nКод одноразовый. Не пересылайте его другим людям."
+                f"{self.command}\n\n"
+                "Не закрывайте это окно: закрытие отменяет код.\n"
+                "Код одноразовый. Не пересылайте его другим людям.\n"
+                "Если реакции нет, проверьте /menu в личном чате и анонимность администратора."
             )
             self.timer.start(1000)
         elif name == self.prefix + "-status":
@@ -92,7 +104,7 @@ class TopicsSetupDialog(QDialog):
                 self.begin.setEnabled(True)
                 self.status.setText("Срок кода истёк или привязка отменена. Создайте новый код.")
             elif result["error"]:
-                self.status.setText(result["error"] + "\nКоманда с кодом остаётся в вашей группе.")
+                self.status.setText(result["error"] + "\n\n" + self.command)
 
     def failed(self, message):
         if self.prefix not in message or self.closed:
@@ -110,5 +122,6 @@ class TopicsSetupDialog(QDialog):
         self.timer.stop()
         self.services.group_pairing.cancel()
         self.status.clear()
+        self.command = ""
         self.backend.completed.disconnect(self.completed)
         self.backend.failed.disconnect(self.failed)
