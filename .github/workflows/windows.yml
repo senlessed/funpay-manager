@@ -1,0 +1,36 @@
+name: Windows checks and preview artifact
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-dev.lock
+      - run: python -m pip install --no-deps -e .
+      - run: python -m pip check
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m pytest -q
+      - shell: pwsh
+        run: ./scripts/build.ps1
+      - shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ./dist/FunPayManager.exe -ArgumentList '--smoke-test' -PassThru -WindowStyle Hidden
+          if (-not $process.WaitForExit(30000)) { $process.Kill($true); throw 'Smoke timeout' }
+          if ($process.ExitCode -ne 0) { throw 'Smoke failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FunPayManager-preview
+          path: |
+            dist/FunPayManager.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
