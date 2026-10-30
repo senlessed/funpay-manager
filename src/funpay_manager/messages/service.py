@@ -12,6 +12,7 @@ class MessageService:
         self._history_lock = asyncio.Lock()
         self._history_times = {}
         self.wake = asyncio.Event()
+        self.notification_wake = None
 
     async def checked_chat(self, local_id, route_key=None):
         expected = await self.storage.get_setting("funpay_account")
@@ -100,9 +101,13 @@ class MessageService:
                 await self.repository.finish(operation_id, "failed", error="not_sent")
             except asyncio.CancelledError:
                 await self.repository.finish(operation_id, "unknown", error="cancelled")
+                if self.notification_wake:
+                    self.notification_wake.set()
                 raise
             except Exception:
                 await self.repository.finish(operation_id, "unknown", error="unconfirmed")
+            if self.notification_wake:
+                self.notification_wake.set()
             return True
 
     async def run(self):

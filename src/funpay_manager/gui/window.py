@@ -56,13 +56,18 @@ class MainWindow(QMainWindow):
         notice.setWordWrap(True)
         layout.addWidget(notice)
         form = QFormLayout()
-        for name, state in (
-            ("Синхронизация", "Недоступна до подключения аккаунтов"),
-            ("Активные чаты", "Нет данных"),
-            ("Автоподнятие", "Выключено · модуль ещё не реализован"),
-            ("Последняя синхронизация", "Не выполнялась"),
-        ):
+        for name, state in (("Автоподнятие", "Выключено · модуль ещё не реализован"),):
             form.addRow(name, QLabel(state))
+        self.chat_count = QLabel("Нет данных")
+        form.addRow("Чаты в доступном списке", self.chat_count)
+        self.sync_status = QLabel("Ожидание запуска")
+        self.sync_status.setWordWrap(True)
+        form.addRow("Синхронизация", self.sync_status)
+        self.last_sync = QLabel("Не выполнялась")
+        form.addRow("Последняя успешная", self.last_sync)
+        self.notification_status = QLabel("Ожидание событий")
+        self.notification_status.setWordWrap(True)
+        form.addRow("Уведомления", self.notification_status)
         self.database_status = QLabel("Подготовка…")
         form.addRow("Локальная база", self.database_status)
         layout.addLayout(form)
@@ -88,6 +93,14 @@ class MainWindow(QMainWindow):
         self.sending.setEnabled(False)
         self.sending.toggled.connect(self.change_sending)
         layout.addWidget(self.sending)
+        self.sync_enabled = QCheckBox("Фоновая синхронизация чатов FunPay")
+        self.notifications_enabled = QCheckBox(
+            "Уведомления о новых сообщениях и доставке в личный Telegram"
+        )
+        for control in (self.sync_enabled, self.notifications_enabled):
+            control.setEnabled(False)
+            control.toggled.connect(self.change_background)
+            layout.addWidget(control)
         self.dark = QCheckBox("Тёмная тема")
         self.dark.setEnabled(False)
         self.dark.toggled.connect(self.change_theme)
@@ -129,6 +142,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Статус", self.reveal)
         menu.addAction("Настройки", self.reveal)
         menu.addAction("Логи", logs.click)
+        menu.addAction("Приостановить синхронизацию", lambda: self.sync_enabled.setChecked(False))
+        menu.addAction("Возобновить синхронизацию", lambda: self.sync_enabled.setChecked(True))
         menu.addSeparator()
         menu.addAction("Полностью выйти", self.quit_requested.emit)
         self.tray.setContextMenu(menu)
@@ -151,6 +166,13 @@ class MainWindow(QMainWindow):
     def initialize(self) -> None:
         async def prepare():
             await self.storage.migrate()
+            expected = await self.storage.get_setting("funpay_account")
+            async with self.storage.connect() as db:
+                async with db.execute(
+                    "SELECT cursor FROM sync_state WHERE component=?",
+                    (f"fp-last-success:{expected['id']}" if expected else "none",),
+                ) as cursor:
+                    last = await cursor.fetchone()
             if self.network_enabled:
                 await self.services.start_telegram()
             return {
@@ -158,6 +180,9 @@ class MainWindow(QMainWindow):
                 "binding": await self.storage.get_setting("telegram_binding"),
                 "funpay": await self.storage.get_setting("funpay_account"),
                 "sending": await self.storage.get_setting("sending_enabled", False),
+                "sync": await self.storage.get_setting("sync_enabled", True),
+                "notifications": await self.storage.get_setting("notifications_enabled", True),
+                "last_sync": float(last[0]) if last else None,
             }
 
         self.backend.submit("initialize", prepare)
@@ -172,6 +197,15 @@ class MainWindow(QMainWindow):
             self.apply_theme(bool(result["dark_theme"]))
             self.binding = result["binding"]
             self.funpay_button.setEnabled(True)
+            self.set_background_controls(result)
+            if result["last_sync"]:
+                self.last_sync.setText(
+                    datetime.fromtimestamp(result["last_sync"], UTC).strftime(
+                        "%d.%m.%Y %H:%M:%S UTC"
+                    )
+                )
+            else:
+                self.last_sync.setText("Не выполнялась")
             self.sending.blockSignals(True)
             self.sending.setChecked(bool(result["sending"]))
             self.sending.blockSignals(False)
@@ -192,7 +226,7 @@ class MainWindow(QMainWindow):
             self.backup_button.setEnabled(True)
             self.restore_button.setEnabled(True)
             self.status.setText(
-                "История обновляется при открытии чата. Фоновая синхронизация пока недоступна."
+                "Компоненты готовы. Синхронизация ограничена доступным списком и историей FunPay."
             )
             if self.first_run:
                 self.first_run = False
@@ -211,6 +245,28 @@ class MainWindow(QMainWindow):
             )
         elif name == "telegram-status":
             self.telegram_status.setText("Telegram: " + str(result))
+        elif name == "sync-status":
+            if isinstance(result, dict):
+                self.sync_status.setText(result["message"])
+                if "chats_count" in result:
+                    self.chat_count.setText(str(result["chats_count"]))
+                if result.get("last_success"):
+                    self.last_sync.setText(
+                        datetime.fromtimestamp(result["last_success"], UTC).strftime(
+                            "%d.%m.%Y %H:%M:%S UTC"
+                        )
+                    )
+                if result.get("auth_paused"):
+                    for control in (self.sending, self.sync_enabled):
+                        control.blockSignals(True)
+                        control.setChecked(False)
+                        control.blockSignals(False)
+            else:
+                self.sync_status.setText(str(result))
+        elif name == "notification-status":
+            self.notification_status.setText(str(result))
+        elif name == "background-settings":
+            self.set_background_controls(result)
         elif name in ("sending-setting", "sending-state"):
             self.sending.blockSignals(True)
             self.sending.setChecked(bool(result))
@@ -234,6 +290,35 @@ class MainWindow(QMainWindow):
             self.backend.submit(
                 "sending-state", lambda: self.storage.get_setting("sending_enabled", False)
             )
+        if "background-settings" in message:
+            self.initialize()
+
+    def set_background_controls(self, result):
+        for control, key in (
+            (self.sync_enabled, "sync"),
+            (self.notifications_enabled, "notifications"),
+        ):
+            control.blockSignals(True)
+            control.setChecked(bool(result[key]))
+            control.blockSignals(False)
+            control.setEnabled(True)
+        if not result["notifications"]:
+            self.notification_status.setText("Выключены")
+        if not result["sync"]:
+            self.sync_status.setText("Приостановлена")
+
+    def change_background(self, _):
+        sync = self.sync_enabled.isChecked() if self.sender() == self.sync_enabled else None
+        notifications = (
+            self.notifications_enabled.isChecked()
+            if self.sender() == self.notifications_enabled
+            else None
+        )
+        self.sync_enabled.setEnabled(False)
+        self.notifications_enabled.setEnabled(False)
+        self.backend.submit(
+            "background-settings", lambda: self.services.set_background(sync, notifications)
+        )
 
     def refresh_startup(self) -> None:
         self.startup.blockSignals(True)
@@ -306,7 +391,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Восстановить базу?",
                 "Текущие настройки, история и очередь будут заменены выбранной копией.\n"
-                "Отправка после восстановления будет выключена.\n"
+                "Отправка, синхронизация и уведомления после восстановления будут выключены.\n"
                 "Предварительно будет сохранена страховочная копия текущей базы.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,

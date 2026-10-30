@@ -56,12 +56,13 @@ P0 — безопасность и целостность; P1 — функции
 - [ ] Сериализованный production адаптер, HTTP timeouts, contract tests.
 - [x] accounts/chats/messages/outgoing/reply_contexts, миграция 1 → 2, FK/индексы.
 - [ ] Customers и связанные данные покупателей.
-- [ ] SyncWorker, bounded history, durable cursor, backoff, pause/reconnect.
+- [x] SyncWorker, bounded history, durable cursor, backoff, pause/reconnect.
+- [x] Общий RequestGate для FunPay, тихая начальная точка и независимые workers.
 - [x] MessageService, дедупликация remote ID и направление по author ID.
 - [x] История по запросу, пагинация, локальная копия при ошибке, TTL контекста ответа.
 - [x] Текстовый ответ через очередь, отправка opt-in в Windows (mock/fixtures).
 - [ ] aiogram polling, owner middleware, inline меню/пагинация/поиск/ответ/назад.
-- [ ] Уведомления и delivery outbox; HTML escaping/длинный текст.
+- [x] Личные уведомления и notification outbox, plain text/UTF-16 limit, без URL preview.
 
 Критерий: подтверждённая доставка, история перезапускается, UI не пишет в адаптер
 напрямую. Реальные тестовые сообщения только после явного разрешения.
@@ -83,8 +84,9 @@ foreign group, unknown thread не вызывают отправку; повто
 - [x] failed/unknown, preflight history и проверка нового remote ID при ack.
 - [x] Ручное закрытие без повтора, UUID операций, защита stale callbacks после restore.
 - [x] Restore выключает отправку и переводит ожидающие снимка в unknown до замены DB.
-- [ ] Автоматические уведомления о смене статуса доставки.
-- [ ] Изоляция workers, jitter/retry_after, graceful shutdown сетевых ресурсов.
+- [x] Автоматические уведомления о смене статуса доставки.
+- [x] Изоляция workers, jitter/retry_after, graceful shutdown сетевых ресурсов.
+- [x] Bounded mock-прогон: 100 событий, рестарт ingest, одна uncertain доставка, без дублей.
 - [ ] Тесты рестарта/crash/потери сети/конкуренции, длительный mock-run.
 
 Критерий: при timeout-after-send нет слепого повтора, текст сохранён, неизвестная
@@ -132,7 +134,7 @@ foreign group, unknown thread не вызывают отправку; повто
 - [ ] Проверить все критерии раздела 25 исходного ТЗ с evidence.
 
 Сейчас: исследование выполнено, этап 2 начат; реализована Telegram-часть этапа 3.
-71 тест прошёл. История и очередь ответов добавлены (0.1.0.dev1),
+96 тестов прошли. Синхронизация и уведомления добавлены (0.1.0.dev2),
 evidence в docs/VALIDATION.md. Живые чтение/отправка FunPay не проверены.
-Фоновая синхронизация, уведомления, остальные шаги мастера, Topics и лоты ещё не реализованы.
+Длительный soak, живые интеграции, остальные шаги мастера, Topics и лоты ещё не готовы.
 Не считать эту сборку готовой для продаж.

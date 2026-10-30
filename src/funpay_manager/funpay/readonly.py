@@ -14,11 +14,15 @@ class FunPayConnectionError(RuntimeError):
     """Safe diagnostic; never retain raw responses/cookies in the exception."""
 
 
+class FunPayAuthError(FunPayConnectionError):
+    """Session expired or site protection requires a manual check."""
+
+
 def parse_identity(html: str) -> tuple[AccountInfo, str]:
     page = BeautifulSoup(html, "html.parser")
     name, body = page.select_one(".user-link-name"), page.body
     if name is None or body is None:
-        raise FunPayConnectionError("Авторизация не подтверждена; возможна CAPTCHA")
+        raise FunPayAuthError("Авторизация не подтверждена; возможна CAPTCHA")
     try:
         data = json.loads(body.get("data-app-data", ""))
         user_id, csrf = data["userId"], data["csrf-token"]
@@ -76,8 +80,15 @@ class FunPayReadOnlyAdapter:
         self.account: AccountInfo | None = None
         self._csrf: str | None = None
         self._lock = asyncio.Lock()
+        self.request_gate = None
 
     async def _request(self, method: str, path: str, data=None) -> str:
+        if self.request_gate is not None:
+            async with self.request_gate.slot():
+                return await self._perform_request(method, path, data)
+        return await self._perform_request(method, path, data)
+
+    async def _perform_request(self, method: str, path: str, data=None) -> str:
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20),
@@ -91,6 +102,8 @@ class FunPayReadOnlyAdapter:
             async with self._session.request(
                 method, "https://funpay.com" + path, data=data, allow_redirects=False
             ) as response:
+                if response.status in (401, 403):
+                    raise FunPayAuthError("Требуется проверить авторизацию на FunPay")
                 if response.status != 200:
                     raise FunPayConnectionError(f"FunPay ответил HTTP {response.status}")
                 body = bytearray()

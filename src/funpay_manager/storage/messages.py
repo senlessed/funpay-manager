@@ -4,6 +4,8 @@ from uuid import uuid4
 
 import aiosqlite
 
+from funpay_manager.notifications.repository import queue_delivery
+
 
 class MessageRepository:
     def __init__(self, storage):
@@ -184,12 +186,14 @@ class MessageRepository:
         if status not in ("sent", "failed", "unknown"):
             raise ValueError("Invalid final status")
         async with self.storage.connect() as db:
-            await db.execute(
+            cursor = await db.execute(
                 "UPDATE outgoing_messages SET status=?,remote_message_id=?,last_error=?,"
                 "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
                 "WHERE operation_id=? AND status='sending'",
                 (status, remote_id, error, operation_id),
             )
+            if cursor.rowcount:
+                await queue_delivery(db, operation_id, status)
             await db.commit()
 
     async def operations(self, account_id: str, page: int = 0):
@@ -216,12 +220,14 @@ class MessageRepository:
                 "VALUES (?,?,?,?,?,'outgoing') ON CONFLICT(chat_id,remote_id) DO NOTHING",
                 (operation["chat_id"], message.id, message.author_id, message.text, message.kind),
             )
-            await db.execute(
+            cursor = await db.execute(
                 "UPDATE outgoing_messages SET status='sent',remote_message_id=?,"
                 "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
                 "WHERE operation_id=? AND status='sending'",
                 (message.id, operation["operation_id"]),
             )
+            if cursor.rowcount:
+                await queue_delivery(db, operation["operation_id"], "sent")
             await db.commit()
 
     async def close_operation(self, operation_id, account_id):

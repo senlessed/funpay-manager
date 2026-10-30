@@ -2,8 +2,13 @@ import asyncio
 import re
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+
+from funpay_manager.utils.text import telegram_text
+
+from .notification_view import notification_screen
 
 
 def menu() -> InlineKeyboardMarkup:
@@ -12,6 +17,7 @@ def menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💬 Чаты", callback_data="chats:0")],
             [InlineKeyboardButton(text="🟢 Статус", callback_data="status")],
             [InlineKeyboardButton(text="📤 Очередь", callback_data="outbox")],
+            [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notifications")],
         ]
     )
 
@@ -95,6 +101,10 @@ class TelegramBotService:
         if not self.authorized(query.from_user, getattr(message, "chat", None)):
             return
         data = query.data or ""
+        if data == "notifications" and self.storage:
+            await query.answer()
+            await notification_screen(self.storage, self.binding, self.bot, message.chat.id)
+            return
         if self.messages and await self.message_callback(query, data):
             return
         if data not in ("menu", "status") and not (
@@ -159,7 +169,7 @@ class TelegramBotService:
             or getattr(message, "reply_markup", None) != markup
         ):
             await self.bot.edit_message_text(
-                text,
+                telegram_text(text),
                 chat_id=message.chat.id,
                 message_id=message.message_id,
                 reply_markup=markup,
@@ -309,7 +319,9 @@ class TelegramBotService:
                 ]
             else:
                 return False
-            await self.bot.send_message(target, text, reply_markup=markup, parse_mode=None)
+            await self.bot.send_message(
+                target, telegram_text(text), reply_markup=markup, parse_mode=None
+            )
         except Exception:
             await self.bot.send_message(
                 target,
@@ -321,7 +333,9 @@ class TelegramBotService:
         return True
 
     async def run(self, storage):
-        bot = self.bot = self.bot_factory(token=self.token)
+        bot = self.bot = self.bot_factory(
+            token=self.token, default=DefaultBotProperties(link_preview_is_disabled=True)
+        )
         try:
             startup_delay = 1
             while True:

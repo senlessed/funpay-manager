@@ -7,8 +7,9 @@ from pathlib import Path
 import aiosqlite
 
 from .message_schema import MESSAGE_COLUMNS, MIGRATION_2
+from .sync_schema import MIGRATION_3, SYNC_COLUMNS
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Domain tables are added by their feature migrations, rather than empty placeholders.
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -64,6 +65,11 @@ class LocalStorage:
                         if statement.strip():
                             await connection.execute(statement)
                     await connection.execute("PRAGMA user_version=2")
+                if version < 3:
+                    for statement in MIGRATION_3.split(";"):
+                        if statement.strip():
+                            await connection.execute(statement)
+                    await connection.execute("PRAGMA user_version=3")
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -130,15 +136,17 @@ class LocalStorage:
                     raise ValueError("Резервная копия повреждена")
             async with backup.execute("PRAGMA user_version") as cursor:
                 source_version = (await cursor.fetchone())[0]
-                if source_version not in (1, SCHEMA_VERSION):
+                if not 1 <= source_version <= SCHEMA_VERSION:
                     raise ValueError("Неподдерживаемая версия резервной копии")
             tables = {
                 "settings": {"key", "value", "updated_at"},
                 "audit_logs": {"id", "event", "created_at"},
                 "sync_state": {"component", "cursor", "updated_at"},
             }
-            if source_version == 2:
+            if source_version >= 2:
                 tables.update(MESSAGE_COLUMNS)
+            if source_version >= 3:
+                tables.update(SYNC_COLUMNS)
             for table, columns in tables.items():
                 async with backup.execute(f"PRAGMA table_info({table})") as cursor:
                     if not columns <= {row[1] for row in await cursor.fetchall()}:
@@ -152,12 +160,25 @@ class LocalStorage:
                     await backup.backup(staged)
                     # Disable writes in the staging copy BEFORE it can replace the live DB.
                     await staged.execute("DELETE FROM settings WHERE key='sending_enabled'")
-                    if source_version == 2:
+                    await staged.executemany(
+                        "INSERT INTO settings(key,value) VALUES (?,'false') "
+                        "ON CONFLICT(key) DO UPDATE SET value='false'",
+                        [("sync_enabled",), ("notifications_enabled",)],
+                    )
+                    if source_version >= 2:
                         await staged.execute(
                             "UPDATE outgoing_messages SET status='unknown', "
                             "last_error='restored_snapshot' WHERE status IN ('queued','sending')"
                         )
                         await staged.execute("DELETE FROM reply_contexts")
+                    if source_version >= 3:
+                        await staged.execute(
+                            "UPDATE notifications SET status='unknown', "
+                            "last_error='restored_snapshot' "
+                            "WHERE status IN ('queued','sending')"
+                        )
+                        await staged.execute("DELETE FROM chat_sync_state")
+                        await staged.execute("DELETE FROM sync_state WHERE component LIKE 'fp-%'")
                     await staged.commit()
                     async with self.connect() as target, aiosqlite.connect(safety) as emergency:
                         await target.backup(emergency)

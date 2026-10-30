@@ -113,3 +113,14 @@ async def test_polling_commits_offset_and_closes_on_cancellation(tmp_path):
     await asyncio.gather(task, return_exceptions=True)
     assert await storage.get_setting("telegram_offset:42") == 101
     bot.session.close.assert_awaited_once()
+
+
+async def test_emoji_heavy_chat_previews_stay_under_telegram_text_limit():
+    handler = service()
+    handler.chats.return_value = [ChatInfo(str(i), "😀" * 100, "😀" * 350) for i in range(5)]
+    callback = NS(
+        from_user=message().from_user, message=message(), data="chats:0", answer=AsyncMock()
+    )
+    await handler.callback(callback)
+    text = handler.bot.edit_message_text.await_args.args[0]
+    assert len(text.encode("utf-16-le")) <= 7000

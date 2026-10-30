@@ -17,7 +17,7 @@ async def test_migration_restart_and_settings(tmp_path):
     assert await restarted.get_setting("absent", "default") == "default"
     async with restarted.connect() as connection:
         for pragma, expected in (
-            ("user_version", 2),
+            ("user_version", 3),
             ("journal_mode", "wal"),
             ("foreign_keys", 1),
             ("busy_timeout", 5000),
