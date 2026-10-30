@@ -4,6 +4,8 @@ from uuid import uuid4
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout
 
+from funpay_manager.utils.diagnostics import funpay_failure_text
+
 
 class FunPaySetupDialog(QDialog):
     def __init__(self, services, backend, parent=None):
@@ -13,13 +15,14 @@ class FunPaySetupDialog(QDialog):
         self.cancelled = threading.Event()
         self.setWindowTitle("Подключение FunPay · проверка профиля")
         self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.setMinimumWidth(530)
+        self.setMinimumSize(580, 520)
         layout = QVBoxLayout(self)
         description = QLabel(
             "Подключайте только свой аккаунт FunPay.\n"
             "В браузере откройте funpay.com и войдите в аккаунт. Затем откройте\n"
             "инструменты разработчика (F12) → Application/Хранилище → Cookies →\n"
-            "https://funpay.com и скопируйте значение cookie golden_key.\n\n"
+            "https://funpay.com и скопируйте значение cookie golden_key из колонки Value.\n"
+            "Нужно значение, а не название cookie и не вся строка Cookies.\n\n"
             "Этот ключ даёт доступ к аккаунту: не пересылайте его в Telegram\n"
             "или Issues. Здесь он проверяется и сохраняется в Credential Manager.\n"
             "Проверка читает профиль. Отправка включается отдельно в главном окне.\n"
@@ -46,7 +49,7 @@ class FunPaySetupDialog(QDialog):
         close.clicked.connect(self.reject)
         layout.addWidget(close)
         backend.completed.connect(self.completed)
-        backend.failed.connect(self.failed)
+        backend.operation_failed.connect(self.failed)
         self.finished.connect(self.cleanup)
 
     def connect_account(self):
@@ -69,18 +72,16 @@ class FunPaySetupDialog(QDialog):
             "Ключ сохранён защищённо. В Telegram доступен список чатов."
         )
 
-    def failed(self, message):
-        if self.operation not in message or self.cancelled.is_set():
+    def failed(self, name, code):
+        if name != self.operation or self.cancelled.is_set():
             return
         self.key.setEnabled(True)
         self.connect_button.setEnabled(True)
-        self.status.setText(
-            "Не удалось подключиться. Проверьте ключ, доступ к FunPay и "
-            "Credential Manager. При CAPTCHA откройте сайт вручную."
-        )
+        self.status.setText(funpay_failure_text(code))
+        self.adjustSize()
 
     def cleanup(self, _):
         self.cancelled.set()
         self.key.clear()
         self.backend.completed.disconnect(self.completed)
-        self.backend.failed.disconnect(self.failed)
+        self.backend.operation_failed.disconnect(self.failed)

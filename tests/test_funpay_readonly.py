@@ -1,8 +1,10 @@
 import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 
 from funpay_manager.app.services import ApplicationServices
@@ -10,10 +12,12 @@ from funpay_manager.funpay.adapter import AccountInfo, ChatInfo
 from funpay_manager.funpay.readonly import (
     FunPayConnectionError,
     FunPayReadOnlyAdapter,
+    normalize_golden_key,
     parse_chats,
     parse_identity,
 )
 from funpay_manager.storage.database import LocalStorage
+from funpay_manager.utils.diagnostics import DiagnosticError, FailureCode, funpay_failure_text
 
 
 def identity_html(user_id=42):
@@ -123,3 +127,100 @@ async def test_services_refuses_session_of_another_account(tmp_path):
         await services.get_chats()
     adapter.get_chats.assert_not_awaited()
     adapter.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("value", ["test-key", " golden_key=test-key ", 'golden_key="test-key"'])
+def test_single_cookie_value_and_assignment(value):
+    assert normalize_golden_key(value) == "test-key"
+
+
+@pytest.mark.parametrize(
+    "value", ["", "golden_key=", "golden_key=x; PHPSESSID=other", "x\ny", "x y"]
+)
+def test_bad_cookie_input_has_safe_code(value):
+    with pytest.raises(FunPayConnectionError) as error:
+        FunPayReadOnlyAdapter(value)
+    assert error.value.diagnostic_code == FailureCode.FP_KEY
+    assert value not in str(error.value) or not value
+
+
+@pytest.mark.parametrize(
+    "status,transport_error,expected",
+    [
+        (401, None, FailureCode.FP_HTTP_401),
+        (403, None, FailureCode.FP_HTTP_403),
+        (429, None, FailureCode.FP_HTTP_429),
+        (503, None, FailureCode.FP_HTTP),
+        (302, None, FailureCode.FP_HTTP),
+        (200, None, FailureCode.FP_AUTH),
+        (None, TimeoutError("sensitive transport body"), FailureCode.FP_TIMEOUT),
+        (None, aiohttp.ClientSSLError(None, OSError("sensitive TLS body")), FailureCode.FP_TLS),
+        (None, aiohttp.ClientConnectionError("sensitive network body"), FailureCode.FP_NETWORK),
+    ],
+)
+async def test_auth_transport_diagnostics_do_not_expose_response(
+    monkeypatch, status, transport_error, expected
+):
+    class Content:
+        async def iter_chunked(self, size):
+            yield b"<body>sensitive response, no authenticated identity</body>"
+
+    class Response:
+        content = Content()
+
+    response = Response()
+    response.status = status
+    options = {}
+
+    class Session:
+        def __init__(self, **kwargs):
+            options.update(kwargs)
+
+        @asynccontextmanager
+        async def request(self, method, url, **kwargs):
+            assert kwargs["allow_redirects"] is False
+            assert "ssl" not in kwargs
+            if transport_error:
+                raise transport_error
+            yield response
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    adapter = FunPayReadOnlyAdapter("golden_key=test-only-key")
+    try:
+        with pytest.raises(FunPayConnectionError) as error:
+            await adapter.authenticate()
+        assert error.value.diagnostic_code == expected
+        assert options["cookies"] == {"golden_key": "test-only-key"}
+        assert "sensitive" not in funpay_failure_text(expected)
+        assert "test-only-key" not in funpay_failure_text(expected)
+    finally:
+        await adapter.close()
+
+
+async def test_vault_failure_is_distinct_and_canonical_value_is_stored(tmp_path):
+    storage = LocalStorage(tmp_path / "db")
+    await storage.migrate()
+    adapter = AsyncMock()
+    adapter.authenticate.return_value = AccountInfo("42", "seller")
+
+    class Vault:
+        def set(self, name, value):
+            assert (name, value) == ("funpay_session", "test-key")
+            raise OSError("sensitive vault error")
+
+    services = ApplicationServices(
+        storage, lambda *a: None, lambda **kw: Vault(), lambda key: adapter
+    )
+    with pytest.raises(DiagnosticError) as error:
+        await services.connect_funpay('golden_key="test-key"')
+    assert error.value.diagnostic_code == FailureCode.FP_CREDENTIALS
+    assert await storage.get_setting("funpay_account") is None
+    adapter.close.assert_awaited_once()
+
+
+def test_unknown_diagnostic_code_is_not_displayed():
+    assert "sensitive" not in funpay_failure_text("sensitive arbitrary code")
+    assert "unexpected" in funpay_failure_text("sensitive arbitrary code")

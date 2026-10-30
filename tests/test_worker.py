@@ -1,25 +1,32 @@
 from PySide6.QtCore import QCoreApplication, QEventLoop, QLockFile, QTimer
 
 from funpay_manager.app.worker import BackendThread
+from funpay_manager.utils.diagnostics import DiagnosticError, FailureCode
 
 
 def test_worker_failure_isolation_and_idempotent_shutdown():
     app = QCoreApplication.instance() or QCoreApplication([])
     worker = BackendThread()
     wait = QEventLoop()
-    errors, results = [], []
+    errors, results, details = [], [], []
     deadline = QTimer()
     deadline.setSingleShot(True)
     deadline.timeout.connect(wait.quit)
 
     async def fail():
-        raise ValueError("sensitive exception body must not appear in diagnostics")
+        raise DiagnosticError(
+            "sensitive exception body must not appear in diagnostics", code=FailureCode.FP_HTTP_403
+        )
 
     async def succeed():
         return 42
 
+    async def untrusted_failure():
+        raise ValueError("sensitive arbitrary error body")
+
     def ready():
         worker.submit("failure", fail)
+        worker.submit("untrusted", untrusted_failure)
         worker.submit("success", succeed)
 
     def completed(name, result):
@@ -28,6 +35,7 @@ def test_worker_failure_isolation_and_idempotent_shutdown():
 
     worker.ready.connect(ready)
     worker.failed.connect(errors.append)
+    worker.operation_failed.connect(lambda name, code: details.append((name, code)))
     worker.completed.connect(completed)
     worker.finished.connect(wait.quit)
     deadline.start(5000)
@@ -38,8 +46,9 @@ def test_worker_failure_isolation_and_idempotent_shutdown():
     worker.stop()
     app.processEvents()
     assert results == [42]
-    assert len(errors) == 1
-    assert "sensitive" not in errors[0]
+    assert len(errors) == 2
+    assert all("sensitive" not in error for error in errors)
+    assert details == [("failure", "fp_http_403"), ("untrusted", "unexpected")]
 
 
 def test_stop_before_backend_ready():

@@ -7,15 +7,33 @@ import secrets
 import aiohttp
 from bs4 import BeautifulSoup
 
+from funpay_manager.utils.diagnostics import DiagnosticError, FailureCode
+
 from .adapter import AccountInfo, ChatInfo
 
 
-class FunPayConnectionError(RuntimeError):
+class FunPayConnectionError(DiagnosticError):
     """Safe diagnostic; never retain raw responses/cookies in the exception."""
+
+    default_code = FailureCode.FP_CONNECTION
 
 
 class FunPayAuthError(FunPayConnectionError):
     """Session expired or site protection requires a manual check."""
+
+    default_code = FailureCode.FP_AUTH
+
+
+def normalize_golden_key(value: str) -> str:
+    """Accept a single copied value/assignment, never a whole Cookie header."""
+    key = value.strip()
+    if key.startswith("golden_key="):
+        key = key[len("golden_key=") :].strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1]
+    if not key or any(ord(c) < 33 or ord(c) > 126 or c in '";,\\' for c in key):
+        raise FunPayConnectionError("Некорректный сессионный ключ", code=FailureCode.FP_KEY)
+    return key
 
 
 def parse_identity(html: str) -> tuple[AccountInfo, str]:
@@ -32,7 +50,9 @@ def parse_identity(html: str) -> tuple[AccountInfo, str]:
             raise ValueError
         return AccountInfo(str(user_id), name.get_text(strip=True)), csrf
     except (ValueError, KeyError, TypeError) as error:
-        raise FunPayConnectionError("Изменился формат страницы FunPay") from error
+        raise FunPayConnectionError(
+            "Изменился формат страницы FunPay", code=FailureCode.FP_FORMAT
+        ) from error
 
 
 def parse_chats(payload: dict) -> list[ChatInfo]:
@@ -73,9 +93,7 @@ def parse_chats(payload: dict) -> list[ChatInfo]:
 
 class FunPayReadOnlyAdapter:
     def __init__(self, golden_key: str):
-        if not golden_key or any(c in golden_key for c in "\r\n;"):
-            raise FunPayConnectionError("Некорректный сессионный ключ")
-        self._key = golden_key
+        self._key = normalize_golden_key(golden_key)
         self._session: aiohttp.ClientSession | None = None
         self.account: AccountInfo | None = None
         self._csrf: str | None = None
@@ -103,17 +121,39 @@ class FunPayReadOnlyAdapter:
                 method, "https://funpay.com" + path, data=data, allow_redirects=False
             ) as response:
                 if response.status in (401, 403):
-                    raise FunPayAuthError("Требуется проверить авторизацию на FunPay")
+                    raise FunPayAuthError(
+                        "Требуется проверить авторизацию на FunPay",
+                        code=(
+                            FailureCode.FP_HTTP_401
+                            if response.status == 401
+                            else FailureCode.FP_HTTP_403
+                        ),
+                    )
                 if response.status != 200:
-                    raise FunPayConnectionError(f"FunPay ответил HTTP {response.status}")
+                    raise FunPayConnectionError(
+                        f"FunPay ответил HTTP {response.status}",
+                        code=FailureCode.FP_HTTP_429
+                        if response.status == 429
+                        else FailureCode.FP_HTTP,
+                    )
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(65536):
                     body.extend(chunk)
                     if len(body) > 4_000_000:
                         raise FunPayConnectionError("Слишком большой ответ FunPay")
                 return body.decode("utf-8")
-        except (aiohttp.ClientError, TimeoutError, UnicodeError) as error:
-            raise FunPayConnectionError("Ошибка подключения FunPay") from error
+        except (aiohttp.ClientSSLError, aiohttp.ServerFingerprintMismatch) as error:
+            raise FunPayConnectionError("Ошибка TLS FunPay", code=FailureCode.FP_TLS) from error
+        except TimeoutError as error:
+            raise FunPayConnectionError("Таймаут FunPay", code=FailureCode.FP_TIMEOUT) from error
+        except aiohttp.ClientError as error:
+            raise FunPayConnectionError(
+                "Ошибка сети FunPay", code=FailureCode.FP_NETWORK
+            ) from error
+        except UnicodeError as error:
+            raise FunPayConnectionError(
+                "Кодировка ответа FunPay", code=FailureCode.FP_FORMAT
+            ) from error
 
     async def authenticate(self) -> AccountInfo:
         async with self._lock:

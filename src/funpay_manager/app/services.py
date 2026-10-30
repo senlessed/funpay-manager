@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from funpay_manager.funpay.messaging import FunPayMessagingAdapter
 from funpay_manager.funpay.rate_limit import RequestGate
-from funpay_manager.funpay.readonly import FunPayReadOnlyAdapter
+from funpay_manager.funpay.readonly import FunPayReadOnlyAdapter, normalize_golden_key
 from funpay_manager.messages.service import MessageService
 from funpay_manager.notifications.service import NotificationService
 from funpay_manager.security.credentials import CredentialStore
@@ -17,6 +17,7 @@ from funpay_manager.telegram.service import TelegramBotService
 from funpay_manager.topics.manager import TopicManager
 from funpay_manager.topics.pairing import GroupPairing
 from funpay_manager.topics.worker import TopicMirrorService
+from funpay_manager.utils.diagnostics import DiagnosticError, FailureCode
 from funpay_manager.utils.events import WakeGroup
 
 
@@ -234,6 +235,7 @@ class ApplicationServices:
             await adapter.close()
 
     async def connect_funpay(self, key: str, cancelled=None) -> dict:
+        key = normalize_golden_key(key)
         restart_sender = self.sender_task is not None
         await self.stop_telegram()
         adapter = self.adapter_factory(key)
@@ -243,7 +245,12 @@ class ApplicationServices:
             if cancelled is not None and cancelled.is_set():
                 raise RuntimeError("Подключение отменено")
             await self.storage.set_setting("sending_enabled", False)
-            await asyncio.to_thread(self.vault().set, "funpay_session", key)
+            try:
+                await asyncio.to_thread(self.vault().set, "funpay_session", key)
+            except Exception as error:
+                raise DiagnosticError(
+                    "Не удалось сохранить ключ FunPay", code=FailureCode.FP_CREDENTIALS
+                ) from error
             identity = {"id": account.id, "username": account.username}
             await self.storage.set_setting("funpay_account", identity)
             self._chat_cache = None

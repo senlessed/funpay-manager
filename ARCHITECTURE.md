@@ -3,10 +3,14 @@
 Статус на 30.10.2026: начальная Windows-основа, не публичный релиз.
 Документ различает реализованное ядро и целевую архитектуру. Чек-лист — в PLAN.md.
 
-Текущий этап 0.1.0.dev3: SQLite schema 4, MessageService, ограниченный SyncWorker,
+Текущий этап 0.1.0.dev4: SQLite schema 4, MessageService, ограниченный SyncWorker,
 notification outbox и Topics с отдельной очередью зеркал. Актуальные контракты — в
 [docs/MESSAGING.md](docs/MESSAGING.md), [docs/SYNC.md](docs/SYNC.md)
 и [docs/TOPICS.md](docs/TOPICS.md). Topics проверены на mocks, живые интеграции не проверены.
+
+Ошибки подключения FunPay передаются из backend в Qt отдельным сигналом с кодом
+из FailureCode; произвольное тело исключения не отображается и не логируется.
+Код отличает неподтверждённый профиль/HTTP-отказ от сети, TLS и ошибки vault.
 
 SyncWorker сохраняет историю, watermark и incoming notification events одной
 транзакцией. Начальный baseline тихий; новый обнаруженный чат уведомляет только

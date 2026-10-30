@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 
 from PySide6.QtCore import QThread, Signal
 
+from funpay_manager.utils.diagnostics import DiagnosticError, FailureCode
+
 logger = logging.getLogger(__name__)
 
 
@@ -13,6 +15,7 @@ class BackendThread(QThread):
 
     ready = Signal()
     failed = Signal(str)
+    operation_failed = Signal(str, str)
     completed = Signal(str, object)
 
     def __init__(self):
@@ -45,8 +48,17 @@ class BackendThread(QThread):
                 self.completed.emit(name, await operation())
             except Exception as error:
                 # Exception bodies can include session URLs/headers. Log type only.
-                logger.error("Backend operation %s failed: %s", name, type(error).__name__)
+                code = (
+                    error.diagnostic_code
+                    if isinstance(error, DiagnosticError)
+                    and isinstance(error.diagnostic_code, FailureCode)
+                    else FailureCode.UNEXPECTED
+                )
+                logger.error(
+                    "Backend operation %s failed: %s [%s]", name, type(error).__name__, code.value
+                )
                 self.failed.emit(f"Ошибка операции {name}: {type(error).__name__}")
+                self.operation_failed.emit(name, code.value)
 
         asyncio.run_coroutine_threadsafe(execute(), self.loop)
 
