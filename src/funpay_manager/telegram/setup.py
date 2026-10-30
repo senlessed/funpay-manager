@@ -1,11 +1,11 @@
 import asyncio
-import hashlib
 import threading
 
 from aiogram import Bot
 
 from funpay_manager.security.credentials import CredentialStore
 from funpay_manager.security.pairing import PairingChallenge
+from funpay_manager.security.profile import credential_profile
 from funpay_manager.storage.database import LocalStorage
 
 
@@ -72,10 +72,12 @@ class TelegramSetup:
                         message.chat.type == "private",
                         user.is_bot,
                     ):
-                        binding = {**self.identity, "owner_id": user.id}
-                        profile = hashlib.sha256(
-                            str(self.storage.path.absolute()).casefold().encode()
-                        ).hexdigest()[:24]
+                        binding = {
+                            **self.identity,
+                            "owner_id": user.id,
+                            "next_update_id": update.update_id + 1,
+                        }
+                        profile = credential_profile(self.storage.path)
                         vault = self.credential_factory(profile=profile)
                         # Persist owner only after secure storage succeeds. No bot replies
                         # or customer actions occur during pairing.

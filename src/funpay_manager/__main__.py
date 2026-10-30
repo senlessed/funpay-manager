@@ -57,6 +57,7 @@ def main() -> int:
         smoke_timeout.timeout.connect(window.request_exit)
         smoke_timeout.start(15_000)
     else:
+        window.network_enabled = True
         if not args.minimized or not window.tray.isVisible():
             window.show()
         window.first_run = True

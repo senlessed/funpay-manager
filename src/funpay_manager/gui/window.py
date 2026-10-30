@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
 from funpay_manager import __version__
 from funpay_manager.app.autostart import Autostart
 from funpay_manager.app.config import Settings
+from funpay_manager.app.services import ApplicationServices
 from funpay_manager.app.worker import BackendThread
+from funpay_manager.gui.funpay_setup import FunPaySetupDialog
 from funpay_manager.gui.telegram_setup import TelegramSetupDialog
 from funpay_manager.storage.database import LocalStorage
 
@@ -36,6 +38,9 @@ class MainWindow(QMainWindow):
         self.first_run = False
         self.setup_dialog = None
         self.binding = None
+        self.network_enabled = False
+        self.funpay_dialog = None
+        self.services = ApplicationServices(storage, backend.completed.emit)
         self.setWindowTitle("FunPay Telegram Manager")
         self.resize(620, 500)
         content = QWidget()
@@ -46,13 +51,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         notice = QLabel(
             "Локальная Windows-основа · " + __version__ + "\n"
-            "Доступна настройка Telegram. Подключение FunPay — следующий этап."
+            "Telegram-бот и чтение списка чатов FunPay. Ответы пока недоступны."
         )
         notice.setWordWrap(True)
         layout.addWidget(notice)
         form = QFormLayout()
         for name, state in (
-            ("FunPay", "Не подключён"),
             ("Синхронизация", "Недоступна до подключения аккаунтов"),
             ("Активные чаты", "Нет данных"),
             ("Автоподнятие", "Выключено · модуль ещё не реализован"),
@@ -65,10 +69,21 @@ class MainWindow(QMainWindow):
         self.telegram_status = QLabel("Telegram: не настроен")
         self.telegram_status.setTextFormat(Qt.TextFormat.PlainText)
         form.addRow("Telegram", self.telegram_status)
+        self.funpay_status = QLabel("Не настроен")
+        self.funpay_status.setTextFormat(Qt.TextFormat.PlainText)
+        form.addRow("FunPay", self.funpay_status)
+        self.funpay_button = QPushButton("Подключить FunPay (только чтение)")
+        self.funpay_button.setEnabled(False)
+        self.funpay_button.clicked.connect(self.show_funpay_setup)
+        layout.addWidget(self.funpay_button)
         self.setup_button = QPushButton("Настроить Telegram")
         self.setup_button.setEnabled(False)
         self.setup_button.clicked.connect(self.show_setup)
         layout.addWidget(self.setup_button)
+        self.reconnect = QPushButton("Переподключить Telegram")
+        self.reconnect.setEnabled(False)
+        self.reconnect.clicked.connect(self.reconnect_telegram)
+        layout.addWidget(self.reconnect)
         self.dark = QCheckBox("Тёмная тема")
         self.dark.setEnabled(False)
         self.dark.toggled.connect(self.change_theme)
@@ -132,9 +147,12 @@ class MainWindow(QMainWindow):
     def initialize(self) -> None:
         async def prepare():
             await self.storage.migrate()
+            if self.network_enabled:
+                await self.services.start_telegram()
             return {
                 "dark_theme": await self.storage.get_setting("dark_theme", False),
                 "binding": await self.storage.get_setting("telegram_binding"),
+                "funpay": await self.storage.get_setting("funpay_account"),
             }
 
         self.backend.submit("initialize", prepare)
@@ -148,17 +166,27 @@ class MainWindow(QMainWindow):
             self.dark.blockSignals(False)
             self.apply_theme(bool(result["dark_theme"]))
             self.binding = result["binding"]
+            self.funpay_button.setEnabled(True)
+            self.reconnect.setEnabled(self.binding is not None)
+            account = result["funpay"]
+            self.funpay_status.setText(
+                f"Сохранён аккаунт {account['username']} · только чтение"
+                if account
+                else "Не настроен"
+            )
             self.setup_button.setEnabled(self.binding is None)
             self.telegram_status.setText(
                 f"Telegram: @{self.binding['username']} · владелец {self.binding['owner_id']}\n"
-                "Привязка сохранена; рабочий бот пока не запущен."
+                "Привязка сохранена."
                 if self.binding
                 else "Telegram: не настроен"
             )
             self.dark.setEnabled(True)
             self.backup_button.setEnabled(True)
             self.restore_button.setEnabled(True)
-            self.status.setText("Локальные компоненты готовы. Аккаунты не подключены.")
+            self.status.setText(
+                "Локальные компоненты готовы. Синхронизация истории ещё недоступна."
+            )
             if self.first_run:
                 self.first_run = False
                 if not self.binding:
@@ -174,9 +202,13 @@ class MainWindow(QMainWindow):
                 "Восстановление",
                 "База восстановлена.\nПредыдущее состояние сохранено: " + str(result),
             )
+        elif name == "telegram-status":
+            self.telegram_status.setText("Telegram: " + str(result))
 
     def failed(self, message: str) -> None:
-        if message.startswith("Ошибка операции telegram-setup-"):
+        if message.startswith("Ошибка операции telegram-setup-") or message.startswith(
+            "Ошибка операции funpay-setup-"
+        ):
             return
         self.centralWidget().setEnabled(True)
         self.status.setText(message)
@@ -239,7 +271,12 @@ class MainWindow(QMainWindow):
 
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
             safety = self.settings.data_dir / "backups" / f"before-restore-{timestamp}.db"
-            await self.storage.restore(Path(source), safety)
+            await self.services.stop_telegram()
+            try:
+                await self.storage.restore(Path(source), safety)
+            finally:
+                if self.network_enabled:
+                    await self.services.start_telegram()
             return safety
 
         self.backend.submit("restore", perform)
@@ -292,3 +329,18 @@ class MainWindow(QMainWindow):
         self.setup_dialog = TelegramSetupDialog(self.storage, self.backend, self)
         self.setup_dialog.finished.connect(lambda _: self.initialize())
         self.setup_dialog.show()
+
+    def show_funpay_setup(self) -> None:
+        if self.funpay_dialog and self.funpay_dialog.isVisible():
+            self.funpay_dialog.raise_()
+            return
+        self.funpay_dialog = FunPaySetupDialog(self.services, self.backend, self)
+        self.funpay_dialog.finished.connect(lambda _: self.initialize())
+        self.funpay_dialog.show()
+
+    def reconnect_telegram(self) -> None:
+        async def reconnect():
+            await self.services.stop_telegram()
+            await self.services.start_telegram()
+
+        self.backend.submit("reconnect", reconnect)

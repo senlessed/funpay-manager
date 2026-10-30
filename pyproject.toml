@@ -15,6 +15,8 @@ dependencies = [
   "pydantic-settings>=2.7,<3",
   "keyring>=25,<26",
   "aiogram>=3.13,<4",
+  "aiohttp>=3.9,<4",
+  "beautifulsoup4>=4.12,<5",
 ]
 
 [project.optional-dependencies]

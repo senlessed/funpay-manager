@@ -27,8 +27,8 @@ class TelegramSetupDialog(QDialog):
             "1. Создайте отдельного бота у @BotFather командой /newbot.\n"
             "2. Введите токен здесь. Не отправляйте его в чат или исходники.\n"
             "3. Отправьте одноразовый код вашему боту в личном чате.\n\n"
-            "Сейчас настраивается только Telegram. Подключение FunPay и группы\n"
-            "появится на следующем этапе; управление продажами ещё недоступно."
+            "Сейчас настраивается Telegram. Затем подключите FunPay в главном окне.\n"
+            "Группа с темами и отправка сообщений пока недоступны."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -78,7 +78,7 @@ class TelegramSetupDialog(QDialog):
             self.status.setText(
                 f"Владелец {result['owner_id']} привязан к @{result['username']}.\n"
                 "Токен сохранён в Windows Credential Manager.\n"
-                "Рабочее меню бота и FunPay ещё не подключены."
+                "Нажмите «Готово»: бот запустится. Отправьте ему /menu."
             )
             self.close_button.setText("Готово")
             self.close_button.clicked.disconnect()

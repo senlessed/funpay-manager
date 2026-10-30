@@ -9,7 +9,7 @@ P0 — безопасность и целостность; P1 — функции
 - [x] Проверить первичные документы FunPayAPI, альтернатив, Telegram, Qt/PyInstaller.
 - [x] Описать границы API, данные, очередь, безопасность, лицензии, риски.
 - [x] Создать pyproject.toml и модульную структуру.
-- [ ] Выбрать production upstream commit по результатам read-only smoke на FunPay.
+- [ ] Подтвердить выбор production-интеграции по read-only smoke на живом FunPay.
 - [ ] Завершить аудит всех транзитивных лицензий binary distribution.
 
 Критерий: архитектура объясняет каждый поток и отказ; непроверенные предположения явны.
@@ -37,9 +37,11 @@ P0 — безопасность и целостность; P1 — функции
 - [x] Обёртка Windows Credential Manager, подключена к Telegram-мастеру.
 - [x] Первая часть мастера: BotFather, скрытый ввод токена, getMe, проверка webhook.
 - [x] Одноразовый код владельца, TTL 5 минут, лимит попыток, атомарный owner claim.
-- [ ] Оставшиеся шаги мастера: FunPay, группа, функции, итоговая диагностика.
-- [ ] Рабочий TelegramBotService после привязки, проверка сохранённого токена при старте.
-- [ ] Валидация FunPay без побочных действий, закрытие HTTP session.
+- [x] Локальная форма FunPay: скрытый ключ, чтение профиля, Credential Manager.
+- [ ] Остальные шаги мастера: группа, функции, итоговая диагностика.
+- [x] Рабочий TelegramBotService, проверка bot ID и webhook при старте, owner-only меню.
+- [x] Read-only адаптер FunPay, закрытие HTTP session, fixture/контрактные тесты.
+- [ ] Проверить подключение нового адаптера на настоящем аккаунте FunPay.
 - [ ] Одноразовая привязка группы, getChat/getChatMember, права и privacy mode.
 - [ ] Feature flags, автоподнятие по умолчанию off; итоговая диагностика.
 
@@ -49,6 +51,8 @@ P0 — безопасность и целостность; P1 — функции
 ## Этап 4 — переписка (P0/P1, 3)
 
 - [x] FunPayAdapter Protocol и явный MockFunPayAdapter для тестов.
+- [x] Чтение списка чатов: до 50 превью, inline пагинация, cache 30 секунд.
+- [x] Polling с сохранением offset, backoff и остановкой при 401/конфликте.
 - [ ] Сериализованный production адаптер, HTTP timeouts, contract tests.
 - [ ] accounts/chats/messages/customers migration + FK/индексы.
 - [ ] SyncWorker, bounded history, durable cursor, backoff, pause/reconnect.
@@ -122,7 +126,7 @@ foreign group, unknown thread не вызывают отправку; повто
 - [ ] Проверить все критерии раздела 25 исходного ТЗ с evidence.
 
 Сейчас: исследование выполнено, этап 2 начат; реализована Telegram-часть этапа 3.
-32 теста прошли. Telegram-мастер собран в EXE,
-локальный frozen smoke exit 0; evidence в docs/VALIDATION.md. Рабочий Telegram/FunPay,
+44 теста прошли. Telegram-меню и read-only FunPay добавлены,
+evidence в docs/VALIDATION.md. Живой FunPay не проверен. Полная переписка,
 остальные шаги мастера, Topics, очередь и лоты ещё не реализованы.
 Не считать эту сборку готовой для продаж.
