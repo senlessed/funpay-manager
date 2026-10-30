@@ -8,8 +8,9 @@ import aiosqlite
 
 from .message_schema import MESSAGE_COLUMNS, MIGRATION_2
 from .sync_schema import MIGRATION_3, SYNC_COLUMNS
+from .topic_schema import MIGRATION_4, TOPIC_COLUMNS
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Domain tables are added by their feature migrations, rather than empty placeholders.
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -70,6 +71,11 @@ class LocalStorage:
                         if statement.strip():
                             await connection.execute(statement)
                     await connection.execute("PRAGMA user_version=3")
+                if version < 4:
+                    for statement in MIGRATION_4.split(";"):
+                        if statement.strip():
+                            await connection.execute(statement)
+                    await connection.execute("PRAGMA user_version=4")
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -147,6 +153,13 @@ class LocalStorage:
                 tables.update(MESSAGE_COLUMNS)
             if source_version >= 3:
                 tables.update(SYNC_COLUMNS)
+            if source_version >= 4:
+                tables.update(TOPIC_COLUMNS)
+                tables["outgoing_messages"] = tables["outgoing_messages"] | {
+                    "source_thread_id",
+                    "source_binding_key",
+                    "source_owner_id",
+                }
             for table, columns in tables.items():
                 async with backup.execute(f"PRAGMA table_info({table})") as cursor:
                     if not columns <= {row[1] for row in await cursor.fetchall()}:
@@ -163,7 +176,7 @@ class LocalStorage:
                     await staged.executemany(
                         "INSERT INTO settings(key,value) VALUES (?,'false') "
                         "ON CONFLICT(key) DO UPDATE SET value='false'",
-                        [("sync_enabled",), ("notifications_enabled",)],
+                        [("sync_enabled",), ("notifications_enabled",), ("topics_enabled",)],
                     )
                     if source_version >= 2:
                         await staged.execute(
@@ -179,6 +192,16 @@ class LocalStorage:
                         )
                         await staged.execute("DELETE FROM chat_sync_state")
                         await staged.execute("DELETE FROM sync_state WHERE component LIKE 'fp-%'")
+                    if source_version >= 4:
+                        await staged.execute(
+                            "UPDATE telegram_topic_mappings SET status='unknown' "
+                            "WHERE status='creating'"
+                        )
+                        await staged.execute(
+                            "UPDATE telegram_topic_deliveries SET status='unknown',"
+                            "last_error='restored_snapshot' "
+                            "WHERE status IN ('queued','sending')"
+                        )
                     await staged.commit()
                     async with self.connect() as target, aiosqlite.connect(safety) as emergency:
                         await target.backup(emergency)

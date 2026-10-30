@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -24,6 +25,7 @@ from funpay_manager.app.services import ApplicationServices
 from funpay_manager.app.worker import BackendThread
 from funpay_manager.gui.funpay_setup import FunPaySetupDialog
 from funpay_manager.gui.telegram_setup import TelegramSetupDialog
+from funpay_manager.gui.topics_setup import TopicsSetupDialog
 from funpay_manager.storage.database import LocalStorage
 
 
@@ -40,11 +42,15 @@ class MainWindow(QMainWindow):
         self.binding = None
         self.network_enabled = False
         self.funpay_dialog = None
+        self.topics_dialog = None
         self.services = ApplicationServices(storage, backend.completed.emit)
         self.setWindowTitle("FunPay Telegram Manager")
-        self.resize(620, 500)
+        self.resize(660, 680)
         content = QWidget()
-        self.setCentralWidget(content)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        self.setCentralWidget(scroll)
         layout = QVBoxLayout(content)
         title = QLabel("FunPay Telegram Manager")
         title.setStyleSheet("font-size: 24px; font-weight: 600; padding: 12px 0;")
@@ -68,6 +74,10 @@ class MainWindow(QMainWindow):
         self.notification_status = QLabel("Ожидание событий")
         self.notification_status.setWordWrap(True)
         form.addRow("Уведомления", self.notification_status)
+        self.topics_status = QLabel("Группа не привязана")
+        self.topics_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.topics_status.setWordWrap(True)
+        form.addRow("Telegram Topics", self.topics_status)
         self.database_status = QLabel("Подготовка…")
         form.addRow("Локальная база", self.database_status)
         layout.addLayout(form)
@@ -89,6 +99,18 @@ class MainWindow(QMainWindow):
         self.reconnect.setEnabled(False)
         self.reconnect.clicked.connect(self.reconnect_telegram)
         layout.addWidget(self.reconnect)
+        self.topics_button = QPushButton("Подключить закрытую группу с темами")
+        self.topics_button.setEnabled(False)
+        self.topics_button.clicked.connect(self.show_topics_setup)
+        layout.addWidget(self.topics_button)
+        self.topic_enabled = QCheckBox("Зеркалировать переписки в Telegram Topics")
+        self.topic_enabled.setEnabled(False)
+        self.topic_enabled.toggled.connect(self.change_topics)
+        layout.addWidget(self.topic_enabled)
+        self.disconnect_topics = QPushButton("Отключить группу")
+        self.disconnect_topics.setEnabled(False)
+        self.disconnect_topics.clicked.connect(self.disconnect_group)
+        layout.addWidget(self.disconnect_topics)
         self.sending = QCheckBox("Разрешить отправку сообщений из очереди в FunPay")
         self.sending.setEnabled(False)
         self.sending.toggled.connect(self.change_sending)
@@ -183,6 +205,8 @@ class MainWindow(QMainWindow):
                 "sync": await self.storage.get_setting("sync_enabled", True),
                 "notifications": await self.storage.get_setting("notifications_enabled", True),
                 "last_sync": float(last[0]) if last else None,
+                "group": await self.storage.get_setting("telegram_group"),
+                "topics_enabled": await self.storage.get_setting("topics_enabled", False),
             }
 
         self.backend.submit("initialize", prepare)
@@ -212,6 +236,20 @@ class MainWindow(QMainWindow):
             self.sending.setEnabled(result["funpay"] is not None and self.binding is not None)
             self.reconnect.setEnabled(self.binding is not None)
             account = result["funpay"]
+            group = result["group"]
+            self.topics_button.setEnabled(
+                group is None and self.binding is not None and account is not None
+            )
+            self.disconnect_topics.setEnabled(group is not None)
+            self.topic_enabled.blockSignals(True)
+            self.topic_enabled.setChecked(bool(result["topics_enabled"]))
+            self.topic_enabled.blockSignals(False)
+            self.topic_enabled.setEnabled(
+                bool(group and account and group["account_id"] == account["id"])
+            )
+            self.topics_status.setText(
+                f"{group['title']} · {group['group_id']}" if group else "Группа не привязана"
+            )
             self.funpay_status.setText(
                 f"Сохранён аккаунт {account['username']}" if account else "Не настроен"
             )
@@ -265,6 +303,17 @@ class MainWindow(QMainWindow):
                 self.sync_status.setText(str(result))
         elif name == "notification-status":
             self.notification_status.setText(str(result))
+        elif name == "topics-status":
+            self.topics_status.setText(str(result))
+            self.backend.submit(
+                "topics-state", lambda: self.storage.get_setting("topics_enabled", False)
+            )
+        elif name == "topics-state":
+            self.topic_enabled.blockSignals(True)
+            self.topic_enabled.setChecked(bool(result))
+            self.topic_enabled.blockSignals(False)
+        elif name in ("topics-setting", "topics-disconnect"):
+            self.initialize()
         elif name == "background-settings":
             self.set_background_controls(result)
         elif name in ("sending-setting", "sending-state"):
@@ -473,6 +522,31 @@ class MainWindow(QMainWindow):
         self.funpay_dialog = FunPaySetupDialog(self.services, self.backend, self)
         self.funpay_dialog.finished.connect(lambda _: self.initialize())
         self.funpay_dialog.show()
+
+    def show_topics_setup(self) -> None:
+        if self.topics_dialog and self.topics_dialog.isVisible():
+            self.topics_dialog.raise_()
+            return
+        self.topics_dialog = TopicsSetupDialog(self.services, self.backend, self)
+        self.topics_dialog.finished.connect(lambda _: self.initialize())
+        self.topics_dialog.show()
+
+    def change_topics(self, enabled):
+        self.backend.submit("topics-setting", lambda: self.services.set_topics(enabled))
+
+    def disconnect_group(self):
+        if (
+            QMessageBox.question(
+                self,
+                "Отключить группу?",
+                "Темы останутся в Telegram, но ответы из них больше не будут отправляться.\n"
+                "Запись в FunPay будет выключена; для другой группы потребуется новый код.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            == QMessageBox.StandardButton.Yes
+        ):
+            self.backend.submit("topics-disconnect", self.services.disconnect_group)
 
     def reconnect_telegram(self) -> None:
         async def reconnect():

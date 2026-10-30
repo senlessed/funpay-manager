@@ -4,6 +4,7 @@ import aiosqlite
 
 from funpay_manager.notifications.repository import queue_event, read_setting
 from funpay_manager.storage.messages import MessageRepository
+from funpay_manager.topics.repository import queue_topic_message
 
 
 class SyncRepository:
@@ -129,6 +130,10 @@ class SyncRepository:
                             text,
                             f"h:{chat.local_id}:{chat.route_key}:0",
                         )
+                    )
+                if message.id in new_ids and direction in ("incoming", "outgoing"):
+                    notifications += int(
+                        await queue_topic_message(db, chat.local_id, message, direction)
                     )
             if ordered:
                 watermark = max(watermark, int(ordered[-1].id))

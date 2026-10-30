@@ -2,6 +2,9 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+
 from funpay_manager.funpay.messaging import FunPayMessagingAdapter
 from funpay_manager.funpay.rate_limit import RequestGate
 from funpay_manager.funpay.readonly import FunPayReadOnlyAdapter
@@ -11,6 +14,10 @@ from funpay_manager.security.credentials import CredentialStore
 from funpay_manager.security.profile import credential_profile
 from funpay_manager.sync.worker import FunPaySyncWorker
 from funpay_manager.telegram.service import TelegramBotService
+from funpay_manager.topics.manager import TopicManager
+from funpay_manager.topics.pairing import GroupPairing
+from funpay_manager.topics.worker import TopicMirrorService
+from funpay_manager.utils.events import WakeGroup
 
 
 class ApplicationServices:
@@ -41,6 +48,19 @@ class ApplicationServices:
         )
         self.sync_task = None
         self.notification_task = None
+        self.topic_manager = TopicManager(storage, self.messages, asyncio.Event())
+        self.group_pairing = GroupPairing(storage, self.topic_manager.wake)
+        self.topic_worker = TopicMirrorService(
+            storage,
+            self.topic_manager,
+            self.vault,
+            lambda state: self.notify("topics-status", state),
+        )
+        self.topic_task = None
+        wake = WakeGroup(self.notifier.wake, self.topic_manager.wake)
+        self.sync.notification_wake = wake
+        self.messages.notification_wake = wake
+        self.messages.topic_authorizer = self.authorize_topic_operation
 
     def vault(self):
         return self.vault_factory(profile=credential_profile(self.storage.path))
@@ -50,6 +70,10 @@ class ApplicationServices:
             await self._start_services()
 
     async def _start_services(self):
+        if self.topic_task is None or self.topic_task.done():
+            await self.topic_manager.repository.recover()
+            self.topic_task = asyncio.create_task(self.topic_worker.run(), name="telegram-topics")
+        self.topic_manager.wake.set()
         if self.notification_task is None or self.notification_task.done():
             await self.notifier.repository.recover()
             self.notification_task = asyncio.create_task(self.notifier.run(), name="notifications")
@@ -77,6 +101,8 @@ class ApplicationServices:
                 lambda s: self.notify("telegram-status", s),
                 messages=self.messages,
                 storage=self.storage,
+                topics=self.topic_manager,
+                group_pairing=self.group_pairing,
             )
         except Exception:
             self.notify("telegram-status", "Не удалось открыть защищённое хранилище")
@@ -95,14 +121,15 @@ class ApplicationServices:
             await self._stop_services()
 
     async def _stop_services(self):
-        for task in (self.sync_task, self.notification_task):
+        for task in (self.sync_task, self.notification_task, self.topic_task):
             if task:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (self.sync_task, self.notification_task) if task),
+            *(task for task in (self.sync_task, self.notification_task, self.topic_task) if task),
             return_exceptions=True,
         )
         self.sync_task = self.notification_task = None
+        self.topic_task = None
         if self.telegram_task:
             self.telegram_task.cancel()
             await asyncio.gather(self.telegram_task, return_exceptions=True)
@@ -125,6 +152,42 @@ class ApplicationServices:
     async def set_sending(self, enabled):
         await self.storage.set_setting("sending_enabled", enabled)
         self.messages.wake.set()
+
+    async def set_topics(self, enabled):
+        await self.storage.set_setting("topics_enabled", enabled)
+        self.topic_manager.wake.set()
+        return enabled
+
+    async def disconnect_group(self):
+        await self.stop_telegram()
+        self.group_pairing.cancel()
+        async with self.storage.connect() as db:
+            await db.execute("DELETE FROM settings WHERE key='telegram_group'")
+            await db.execute(
+                "INSERT INTO settings(key,value) VALUES ('topics_enabled','false') "
+                "ON CONFLICT(key) DO UPDATE SET value='false'"
+            )
+            await db.execute("UPDATE settings SET value='false' WHERE key='sending_enabled'")
+            await db.execute("DELETE FROM telegram_topic_mappings")
+            await db.execute(
+                "UPDATE telegram_topic_deliveries SET status='failed',last_error='unbound' "
+                "WHERE status='queued'"
+            )
+            await db.commit()
+        await self.start_telegram()
+
+    async def authorize_topic_operation(self, operation):
+        binding = await self.storage.get_setting("telegram_binding")
+        token = await asyncio.to_thread(self.vault().get, "telegram_token")
+        if not token or not binding:
+            raise RuntimeError("Telegram binding missing")
+        bot = Bot(token=token, default=DefaultBotProperties(link_preview_is_disabled=True))
+        try:
+            if (await bot.get_me(request_timeout=15)).id != binding["bot_id"]:
+                raise ValueError("Bot ID mismatch")
+            await self.topic_manager.authorize_operation(bot, operation)
+        finally:
+            await bot.session.close()
 
     async def set_background(self, sync_enabled, notifications_enabled):
         if sync_enabled is not None:

@@ -6,6 +6,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
+from funpay_manager.topics.permissions import GroupPermissionError
+from funpay_manager.topics.view import topic_screen
 from funpay_manager.utils.text import telegram_text
 
 from .notification_view import notification_screen
@@ -26,12 +28,22 @@ class TelegramBotService:
     """One private polling consumer. Every handler verifies owner AND private chat."""
 
     def __init__(
-        self, binding: dict, token: str, chats, state, bot_factory=Bot, messages=None, storage=None
+        self,
+        binding: dict,
+        token: str,
+        chats,
+        state,
+        bot_factory=Bot,
+        messages=None,
+        storage=None,
+        topics=None,
+        group_pairing=None,
     ):
         self.binding, self.token = binding, token
         self.chats, self.state, self.bot_factory = chats, state, bot_factory
         self.bot = None
         self.messages, self.storage = messages, storage
+        self.topics, self.group_pairing = topics, group_pairing
         self.dispatcher = Dispatcher()
         self.dispatcher.message.register(self.message)
         self.dispatcher.callback_query.register(self.callback)
@@ -47,6 +59,30 @@ class TelegramBotService:
         )
 
     async def message(self, message, event_update=None):
+        if message.chat.type == "supergroup" and self.topics:
+            if (
+                not message.from_user
+                or message.from_user.is_bot
+                or message.from_user.id != self.binding["owner_id"]
+                or getattr(message, "sender_chat", None)
+            ):
+                return
+            try:
+                if self.group_pairing and await self.group_pairing.handle(self.bot, message):
+                    return
+                group = await self.storage.get_setting("telegram_group")
+                if not group or group["group_id"] != message.chat.id:
+                    return
+                await self.topics.handle_group(
+                    self.bot, message, getattr(event_update, "update_id", None)
+                )
+            except GroupPermissionError:
+                await self.storage.set_setting("topics_enabled", False)
+                self.state("Группа Topics не прошла проверку; Topics приостановлены")
+            except Exception:
+                # No raw group text, codes, headers or Telegram errors in diagnostics.
+                self.state("Не удалось обработать сообщение/команду Topics")
+            return
         if (
             not self.authorized(message.from_user, message.chat)
             or not message.text
@@ -61,7 +97,7 @@ class TelegramBotService:
             await self.bot.send_message(
                 message.chat.id, self.status_text(), reply_markup=menu(), parse_mode=None
             )
-        elif self.messages and not message.text.startswith("/"):
+        elif self.messages and not message.text.lstrip().startswith("/"):
             replied = getattr(message, "reply_to_message", None)
             if not replied:
                 return
@@ -93,7 +129,7 @@ class TelegramBotService:
             "FunPay Telegram Manager\nTelegram: бот работает.\n"
             "Чаты и локальная история доступны после подключения FunPay.\n"
             "Отправка включается отдельно в окне Windows; по умолчанию выключена.\n"
-            "Заказы, Topics и поднятие пока недоступны."
+            "Topics подключаются отдельно в Windows. Заказы и поднятие пока недоступны."
         )
 
     async def callback(self, query):
@@ -101,6 +137,8 @@ class TelegramBotService:
         if not self.authorized(query.from_user, getattr(message, "chat", None)):
             return
         data = query.data or ""
+        if self.topics and await topic_screen(self.topics, self.bot, query, data):
+            return
         if data == "notifications" and self.storage:
             await query.answer()
             await notification_screen(self.storage, self.binding, self.bot, message.chat.id)
@@ -313,6 +351,9 @@ class TelegramBotService:
                         ),
                         InlineKeyboardButton(
                             text="Ответить", callback_data=f"reply:{local_id}:{route}"
+                        ),
+                        InlineKeyboardButton(
+                            text="Тема", callback_data=f"topic:{local_id}:{route}"
                         ),
                     ],
                     [InlineKeyboardButton(text="Чаты", callback_data="chats:0")],

@@ -48,7 +48,7 @@ async def test_v1_upgrade_preserves_settings(tmp_path):
     await storage.migrate()
     assert await storage.get_setting("theme") is True
     async with storage.connect() as db:
-        assert (await (await db.execute("PRAGMA user_version")).fetchone())[0] == 3
+        assert (await (await db.execute("PRAGMA user_version")).fetchone())[0] == 4
 
 
 async def test_history_dedup_direction_and_chat_isolation(tmp_path):

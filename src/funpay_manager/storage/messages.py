@@ -5,6 +5,7 @@ from uuid import uuid4
 import aiosqlite
 
 from funpay_manager.notifications.repository import queue_delivery
+from funpay_manager.topics.repository import queue_topic_message
 
 
 class MessageRepository:
@@ -113,16 +114,31 @@ class MessageRepository:
             )
             await db.commit()
 
-    async def enqueue(self, chat, bot_id, telegram_chat, telegram_message, text, update_id=None):
+    async def enqueue(
+        self,
+        chat,
+        bot_id,
+        telegram_chat,
+        telegram_message,
+        text,
+        update_id=None,
+        source="private_bot",
+        thread_id=None,
+        binding_key=None,
+        owner_id=None,
+    ):
+        if source not in ("private_bot", "topic"):
+            raise ValueError("Unsupported message source")
         async with self.storage.connect() as db:
             await db.execute(
                 "INSERT INTO outgoing_messages(operation_id,account_id,chat_id,source,"
                 "bot_id,telegram_chat_id,telegram_message_id,source_update_id,text,status) "
-                "VALUES (?,?,?,'private_bot',?,?,?,?,?,'queued') ON CONFLICT DO NOTHING",
+                "VALUES (?,?,?,?,?,?,?,?,?,'queued') ON CONFLICT DO NOTHING",
                 (
                     uuid4().hex,
                     chat["account_id"],
                     chat["id"],
+                    source,
                     bot_id,
                     telegram_chat,
                     telegram_message,
@@ -138,6 +154,12 @@ class MessageRepository:
                 row = await cursor.fetchone()
             if row is None:
                 raise ValueError("Telegram update conflicts with a different message")
+            if source == "topic":
+                await db.execute(
+                    "UPDATE outgoing_messages SET source_thread_id=?,source_binding_key=?,"
+                    "source_owner_id=? WHERE operation_id=? AND source_thread_id IS NULL",
+                    (thread_id, binding_key, owner_id, row[0]),
+                )
             await db.commit()
             return row[0]
 
@@ -228,6 +250,7 @@ class MessageRepository:
             )
             if cursor.rowcount:
                 await queue_delivery(db, operation["operation_id"], "sent")
+                await queue_topic_message(db, operation["chat_id"], message, "outgoing", operation)
             await db.commit()
 
     async def close_operation(self, operation_id, account_id):

@@ -31,13 +31,21 @@ async def queue_event(db, account_id, event_key, text, callback_data=None):
 
 async def queue_delivery(db, operation_id, status):
     async with db.execute(
-        "SELECT sequence,account_id,bot_id,telegram_chat_id,text "
+        "SELECT sequence,account_id,bot_id,telegram_chat_id,text,source,source_owner_id "
         "FROM outgoing_messages WHERE operation_id=?",
         (operation_id,),
     ) as cursor:
         row = await cursor.fetchone()
     binding = await read_setting(db, "telegram_binding")
-    if not row or not binding or (row[2], row[3]) != (binding["bot_id"], binding["owner_id"]):
+    if (
+        not row
+        or not binding
+        or row[2] != binding["bot_id"]
+        or (
+            row[3] != binding["owner_id"]
+            and not (row[5] == "topic" and row[6] == binding["owner_id"])
+        )
+    ):
         return
     labels = {
         "sent": "Доставка подтверждена",

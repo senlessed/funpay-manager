@@ -13,6 +13,7 @@ class MessageService:
         self._history_times = {}
         self.wake = asyncio.Event()
         self.notification_wake = None
+        self.topic_authorizer = None
 
     async def checked_chat(self, local_id, route_key=None):
         expected = await self.storage.get_setting("funpay_account")
@@ -84,6 +85,13 @@ class MessageService:
                 return False
             operation_id = operation["operation_id"]
             try:
+                if operation["source"] == "topic":
+                    try:
+                        if self.topic_authorizer is None:
+                            raise ValueError("Topic authorizer missing")
+                        await self.topic_authorizer(operation)
+                    except Exception as error:
+                        raise NotSentError("Topic permission check failed") from error
                 message = await adapter.send_text(operation["remote_id"], operation["text"])
                 if (
                     message.account_id != operation["account_id"]
@@ -109,6 +117,29 @@ class MessageService:
             if self.notification_wake:
                 self.notification_wake.set()
             return True
+
+    async def enqueue_topic(
+        self, local_id, group, telegram_message, thread_id, text, update_id=None
+    ):
+        if not text.strip() or len(text) > 4000:
+            raise ValueError("Сообщение должно содержать 1–4000 символов")
+        chat = await self.checked_chat(local_id)
+        if chat["account_id"] != group["account_id"]:
+            raise ValueError("Topic belongs to another account")
+        operation = await self.repository.enqueue(
+            chat,
+            group["bot_id"],
+            group["group_id"],
+            telegram_message,
+            text,
+            update_id,
+            source="topic",
+            thread_id=thread_id,
+            binding_key=group["binding_key"],
+            owner_id=group["owner_id"],
+        )
+        self.wake.set()
+        return operation
 
     async def run(self):
         self.wake.set()

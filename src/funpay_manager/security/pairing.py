@@ -21,8 +21,17 @@ class PairingChallenge:
     ) -> bool:
         if not self.active or not private or is_bot or user_id <= 0 or chat_id != user_id:
             return False
+        return (
+            self.consume(text.strip().removeprefix("/start "))
+            if text.strip().startswith("/start ")
+            else self.consume("")
+        )
+
+    def consume(self, code: str) -> bool:
+        if not self.active:
+            return False
         self.remaining -= 1
-        if not secrets.compare_digest(text.strip().encode(), f"/start {self.code}".encode()):
+        if not secrets.compare_digest(code.encode(), self.code.encode()):
             return False
         self.used = True
         return True
