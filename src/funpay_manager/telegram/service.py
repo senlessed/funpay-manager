@@ -1,8 +1,9 @@
 import asyncio
+import re
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramUnauthorizedError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def menu() -> InlineKeyboardMarkup:
@@ -10,6 +11,7 @@ def menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="💬 Чаты", callback_data="chats:0")],
             [InlineKeyboardButton(text="🟢 Статус", callback_data="status")],
+            [InlineKeyboardButton(text="📤 Очередь", callback_data="outbox")],
         ]
     )
 
@@ -17,10 +19,13 @@ def menu() -> InlineKeyboardMarkup:
 class TelegramBotService:
     """One private polling consumer. Every handler verifies owner AND private chat."""
 
-    def __init__(self, binding: dict, token: str, chats, state, bot_factory=Bot):
+    def __init__(
+        self, binding: dict, token: str, chats, state, bot_factory=Bot, messages=None, storage=None
+    ):
         self.binding, self.token = binding, token
         self.chats, self.state, self.bot_factory = chats, state, bot_factory
         self.bot = None
+        self.messages, self.storage = messages, storage
         self.dispatcher = Dispatcher()
         self.dispatcher.message.register(self.message)
         self.dispatcher.callback_query.register(self.callback)
@@ -35,19 +40,54 @@ class TelegramBotService:
             and chat.id == user.id
         )
 
-    async def message(self, message):
-        if not self.authorized(message.from_user, message.chat) or not message.text:
+    async def message(self, message, event_update=None):
+        if (
+            not self.authorized(message.from_user, message.chat)
+            or not message.text
+            or not message.text.strip()
+        ):
             return
-        if message.text.split(maxsplit=1)[0] in ("/start", "/menu", "/status"):
+        if message.text.split(maxsplit=1)[0] in ("/start", "/menu", "/status", "/cancel"):
+            if message.text.strip() == "/cancel" and self.messages:
+                await self.messages.repository.cancel_prompts(
+                    self.binding["bot_id"], message.chat.id
+                )
             await self.bot.send_message(
                 message.chat.id, self.status_text(), reply_markup=menu(), parse_mode=None
+            )
+        elif self.messages and not message.text.startswith("/"):
+            replied = getattr(message, "reply_to_message", None)
+            if not replied:
+                return
+            try:
+                operation = await self.messages.enqueue_reply(
+                    self.binding["bot_id"],
+                    message.chat.id,
+                    message.message_id,
+                    replied.message_id,
+                    message.text,
+                    getattr(event_update, "update_id", None),
+                )
+            except ValueError:
+                await self.bot.send_message(
+                    message.chat.id,
+                    "Не поставлено в очередь. Откройте чат → «Ответить» и ответьте на запрос бота.",
+                )
+                return
+            await self.bot.send_message(
+                message.chat.id,
+                f"Сохранено в очереди: {operation}.\n"
+                "Это ещё не подтверждение отправки. Статус — в «Очереди».",
+                reply_markup=menu(),
+                parse_mode=None,
             )
 
     def status_text(self) -> str:
         return (
             "FunPay Telegram Manager\nTelegram: бот работает.\n"
-            "Доступно чтение списка чатов после локального подключения FunPay.\n"
-            "Ответы, заказы, Topics и поднятие пока недоступны."
+            "Чаты и локальная история доступны после подключения FunPay.\n"
+            "Отправка включается отдельно в окне Windows; по умолчанию выключена.\n"
+            "Заказы, Topics и поднятие пока недоступны."
         )
 
     async def callback(self, query):
@@ -55,6 +95,8 @@ class TelegramBotService:
         if not self.authorized(query.from_user, getattr(message, "chat", None)):
             return
         data = query.data or ""
+        if self.messages and await self.message_callback(query, data):
+            return
         if data not in ("menu", "status") and not (
             data.startswith("chats:")
             and data[6:].isascii()
@@ -95,6 +137,17 @@ class TelegramBotService:
                         InlineKeyboardButton(text="→", callback_data=f"chats:{page + 1}")
                     )
                 markup = InlineKeyboardMarkup(inline_keyboard=[buttons] if buttons else [])
+                if self.messages:
+                    markup.inline_keyboard[:0] = [
+                        [
+                            InlineKeyboardButton(
+                                text=f"История: {chat.username[:40]}",
+                                callback_data=f"h:{chat.local_id}:{chat.route_key}:0",
+                            )
+                        ]
+                        for chat in chats[page * 5 : page * 5 + 5]
+                        if chat.local_id and chat.route_key
+                    ]
                 markup.inline_keyboard.append(
                     [
                         InlineKeyboardButton(text="Обновить", callback_data=f"chats:{page}"),
@@ -112,6 +165,160 @@ class TelegramBotService:
                 reply_markup=markup,
                 parse_mode=None,
             )
+
+    async def message_callback(self, query, data):
+        parts = data.split(":")
+        valid = (
+            data == "outbox"
+            or re.fullmatch(r"outbox:[0-9]{1,5}", data)
+            or re.fullmatch(r"h:[1-9][0-9]{0,18}:[a-f0-9]{16}:[0-9]{1,5}", data)
+            or re.fullmatch(r"reply:[1-9][0-9]{0,18}:[a-f0-9]{16}", data)
+            or re.fullmatch(r"(?:close|dismiss):[a-f0-9]{32}", data)
+        )
+        if not valid:
+            return False
+        await query.answer()
+        target = query.message.chat.id
+        try:
+            if parts[0] == "outbox":
+                queue_page = min(int(parts[1]), 10000) if len(parts) == 2 else 0
+                expected = await self.storage.get_setting("funpay_account")
+                operations = (
+                    await self.messages.repository.operations(expected["id"], queue_page)
+                    if expected
+                    else []
+                )
+                enabled = await self.storage.get_setting("sending_enabled", False)
+                text = f"Очередь · отправка {'включена' if enabled else 'выключена'}\n"
+                buttons = []
+                for operation in operations:
+                    label = (
+                        "Закрыта владельцем, без повтора"
+                        if operation["last_error"] == "closed_by_owner"
+                        else operation["status"]
+                    )
+                    text += f"\n#{operation['sequence']} · {label}\n{operation['text'][:180]}\n"
+                    if operation["status"] in ("unknown", "queued") and len(buttons) < 3:
+                        buttons.append(
+                            [
+                                InlineKeyboardButton(
+                                    text=f"Закрыть #{operation['sequence']} без отправки",
+                                    callback_data=f"dismiss:{operation['operation_id']}",
+                                )
+                            ]
+                        )
+                text += "\nunknown: результат неизвестен; проверьте сайт. Слепого повтора нет."
+                if not operations:
+                    text += "\nОчередь пуста."
+                navigation = []
+                if queue_page:
+                    navigation.append(
+                        InlineKeyboardButton(text="Новее", callback_data=f"outbox:{queue_page - 1}")
+                    )
+                if len(operations) == 10:
+                    navigation.append(
+                        InlineKeyboardButton(
+                            text="Старее", callback_data=f"outbox:{queue_page + 1}"
+                        )
+                    )
+                if navigation:
+                    buttons.append(navigation)
+                buttons.append(
+                    [
+                        InlineKeyboardButton(text="Обновить", callback_data=f"outbox:{queue_page}"),
+                        InlineKeyboardButton(text="Меню", callback_data="menu"),
+                    ]
+                )
+                markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            elif parts[0] in ("dismiss", "close") and len(parts) == 2:
+                if parts[0] == "dismiss":
+                    text = (
+                        "Закрыть операцию без отправки/повтора?\n"
+                        "Текст останется в истории очереди.\n"
+                        "Если результат unknown, сообщение уже могло дойти. Проверьте FunPay."
+                    )
+                    markup = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="Закрыть без повтора", callback_data=f"close:{parts[1]}"
+                                ),
+                                InlineKeyboardButton(text="Отмена", callback_data="outbox"),
+                            ]
+                        ]
+                    )
+                else:
+                    expected = await self.storage.get_setting("funpay_account")
+                    if expected:
+                        await self.messages.repository.close_operation(parts[1], expected["id"])
+                        self.messages.wake.set()
+                    text, markup = "Операция закрыта, если ещё не была отправлена.", menu()
+            elif parts[0] == "reply" and len(parts) == 3:
+                if not await self.storage.get_setting("sending_enabled", False):
+                    raise ValueError("Отправка выключена в окне Windows")
+                chat = await self.messages.checked_chat(int(parts[1]), parts[2])
+                prompt = await self.bot.send_message(
+                    target,
+                    f"Ответ для {chat['username'][:100]} · FunPay chat ID {chat['remote_id']}.\n"
+                    "Ответьте на это сообщение текстом (до 4000 символов). Срок — 15 минут.\n"
+                    "Текст будет поставлен в очередь отправки. Для отмены — /cancel.",
+                    reply_markup=ForceReply(selective=True),
+                    parse_mode=None,
+                )
+                await self.messages.prepare_reply(
+                    chat["id"], self.binding["bot_id"], target, prompt.message_id
+                )
+                return True
+            elif parts[0] == "h" and len(parts) == 4:
+                local_id, page, route = int(parts[1]), min(int(parts[3]), 10000), parts[2]
+                chat, rows, refreshed = await self.messages.history(local_id, page, route)
+                text = (
+                    f"{chat['username'][:100]} · чат {chat['remote_id']}\n"
+                    "История: новые → старые. Даты доставки недоступны.\n"
+                    + ("Обновлено с FunPay.\n" if refreshed else "Локальная копия.\n")
+                )
+                for row in rows:
+                    content = row["text"] if row["kind"] == "text" else f"[{row['kind']}]"
+                    text += f"\n#{row['remote_id']} · {row['direction']}\n{content[:450]}\n"
+                if not rows:
+                    text += "\nНет сохранённых сообщений."
+                nav = []
+                if page:
+                    nav.append(
+                        InlineKeyboardButton(
+                            text="Новее", callback_data=f"h:{local_id}:{route}:{page - 1}"
+                        )
+                    )
+                if len(rows) == 5:
+                    nav.append(
+                        InlineKeyboardButton(
+                            text="Старее", callback_data=f"h:{local_id}:{route}:{page + 1}"
+                        )
+                    )
+                markup = InlineKeyboardMarkup(inline_keyboard=[nav] if nav else [])
+                markup.inline_keyboard += [
+                    [
+                        InlineKeyboardButton(
+                            text="Обновить", callback_data=f"h:{local_id}:{route}:0"
+                        ),
+                        InlineKeyboardButton(
+                            text="Ответить", callback_data=f"reply:{local_id}:{route}"
+                        ),
+                    ],
+                    [InlineKeyboardButton(text="Чаты", callback_data="chats:0")],
+                ]
+            else:
+                return False
+            await self.bot.send_message(target, text, reply_markup=markup, parse_mode=None)
+        except Exception:
+            await self.bot.send_message(
+                target,
+                "Действие недоступно. Проверьте подключённый аккаунт "
+                "и разрешение отправки в Windows.",
+                reply_markup=menu(),
+                parse_mode=None,
+            )
+        return True
 
     async def run(self, storage):
         bot = self.bot = self.bot_factory(token=self.token)
@@ -149,8 +356,8 @@ class TelegramBotService:
                     self.state("Работает · long polling")
                     for update in updates:
                         await self.dispatcher.feed_update(bot, update)
-                        # No outbound FunPay operations here. Persist before acknowledging
-                        # via the next getUpdates offset; UI replies can repeat after a crash.
+                        # Outbound text has already been committed and deduplicated by
+                        # MessageService. UI replies can still repeat after a crash.
                         await storage.set_setting(key, update.update_id + 1)
                         offset = update.update_id + 1
                     delay = 1

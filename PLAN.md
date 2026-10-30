@@ -54,9 +54,12 @@ P0 — безопасность и целостность; P1 — функции
 - [x] Чтение списка чатов: до 50 превью, inline пагинация, cache 30 секунд.
 - [x] Polling с сохранением offset, backoff и остановкой при 401/конфликте.
 - [ ] Сериализованный production адаптер, HTTP timeouts, contract tests.
-- [ ] accounts/chats/messages/customers migration + FK/индексы.
+- [x] accounts/chats/messages/outgoing/reply_contexts, миграция 1 → 2, FK/индексы.
+- [ ] Customers и связанные данные покупателей.
 - [ ] SyncWorker, bounded history, durable cursor, backoff, pause/reconnect.
-- [ ] MessageService, remote ID дедупликация и направление по author ID.
+- [x] MessageService, дедупликация remote ID и направление по author ID.
+- [x] История по запросу, пагинация, локальная копия при ошибке, TTL контекста ответа.
+- [x] Текстовый ответ через очередь, отправка opt-in в Windows (mock/fixtures).
 - [ ] aiogram polling, owner middleware, inline меню/пагинация/поиск/ответ/назад.
 - [ ] Уведомления и delivery outbox; HTML escaping/длинный текст.
 
@@ -75,9 +78,12 @@ foreign group, unknown thread не вызывают отправку; повто
 
 ## Этап 6 — надёжность (P0, перед включением реальных ответов этапа 4)
 
-- [ ] Durable outgoing queue, дедупликация updates и source message.
-- [ ] FIFO по chat, атомарный claim, sending после аварии → unknown.
-- [ ] Разделение failed/unknown, сверка history, ручное решение при неопределённости.
+- [x] Durable outgoing queue, дедупликация updates и source message.
+- [x] FIFO по chat, атомарный claim, sending после аварии → unknown.
+- [x] failed/unknown, preflight history и проверка нового remote ID при ack.
+- [x] Ручное закрытие без повтора, UUID операций, защита stale callbacks после restore.
+- [x] Restore выключает отправку и переводит ожидающие снимка в unknown до замены DB.
+- [ ] Автоматические уведомления о смене статуса доставки.
 - [ ] Изоляция workers, jitter/retry_after, graceful shutdown сетевых ресурсов.
 - [ ] Тесты рестарта/crash/потери сети/конкуренции, длительный mock-run.
 
@@ -126,7 +132,7 @@ foreign group, unknown thread не вызывают отправку; повто
 - [ ] Проверить все критерии раздела 25 исходного ТЗ с evidence.
 
 Сейчас: исследование выполнено, этап 2 начат; реализована Telegram-часть этапа 3.
-44 теста прошли. Telegram-меню и read-only FunPay добавлены,
-evidence в docs/VALIDATION.md. Живой FunPay не проверен. Полная переписка,
-остальные шаги мастера, Topics, очередь и лоты ещё не реализованы.
+71 тест прошёл. История и очередь ответов добавлены (0.1.0.dev1),
+evidence в docs/VALIDATION.md. Живые чтение/отправка FunPay не проверены.
+Фоновая синхронизация, уведомления, остальные шаги мастера, Topics и лоты ещё не реализованы.
 Не считать эту сборку готовой для продаж.

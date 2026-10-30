@@ -140,3 +140,24 @@ class FunPayReadOnlyAdapter:
         if self._session:
             await self._session.close()
         self._key = ""
+
+    async def get_history(self, chat_id: str):
+        from .history import parse_messages
+
+        if not chat_id.isascii() or not chat_id.isdecimal() or len(chat_id) > 32:
+            raise FunPayConnectionError("Некорректный ID чата")
+        if self.account is None:
+            await self.authenticate()
+        async with self._lock:
+            text = await self._request(
+                "GET", f"/chat/history?node={chat_id}&last_message=99999999999999999999999"
+            )
+            try:
+                payload = json.loads(text)
+                node = payload["chat"]
+                if "id" in node.get("node", {}) and str(node["node"]["id"]) != chat_id:
+                    raise ValueError
+                items = node["messages"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise FunPayConnectionError("История недоступна") from error
+            return await asyncio.to_thread(parse_messages, items, self.account.id, chat_id)

@@ -14,6 +14,8 @@ class ChatInfo:
     username: str
     last_message: str | None = None
     unread: bool | None = None
+    local_id: int | None = None
+    route_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class Message:
     chat_id: str
     author_id: str
     text: str
+    kind: str = "text"
 
 
 class FunPayAdapter(Protocol):

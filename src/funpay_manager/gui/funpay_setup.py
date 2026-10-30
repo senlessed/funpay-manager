@@ -11,7 +11,7 @@ class FunPaySetupDialog(QDialog):
         self.services, self.backend = services, backend
         self.operation = "funpay-setup-" + uuid4().hex
         self.cancelled = threading.Event()
-        self.setWindowTitle("Подключение FunPay · только чтение")
+        self.setWindowTitle("Подключение FunPay · проверка профиля")
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumWidth(530)
         layout = QVBoxLayout(self)
@@ -22,7 +22,7 @@ class FunPaySetupDialog(QDialog):
             "https://funpay.com и скопируйте значение cookie golden_key.\n\n"
             "Этот ключ даёт доступ к аккаунту: не пересылайте его в Telegram\n"
             "или Issues. Здесь он проверяется и сохраняется в Credential Manager.\n"
-            "Проверка читает профиль. Отправка сообщений и поднятие недоступны.\n"
+            "Проверка читает профиль. Отправка включается отдельно в главном окне.\n"
             "При CAPTCHA/блокировке остановитесь и войдите на сайт вручную."
         )
         description.setWordWrap(True)

@@ -1,11 +1,14 @@
 import asyncio
 import json
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+from .message_schema import MESSAGE_COLUMNS, MIGRATION_2
+
+SCHEMA_VERSION = 2
 # Domain tables are added by their feature migrations, rather than empty placeholders.
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -56,6 +59,11 @@ class LocalStorage:
                         if statement.strip():
                             await connection.execute(statement)
                     await connection.execute("PRAGMA user_version=1")
+                if version < 2:
+                    for statement in MIGRATION_2.split(";"):
+                        if statement.strip():
+                            await connection.execute(statement)
+                    await connection.execute("PRAGMA user_version=2")
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -121,16 +129,38 @@ class LocalStorage:
                 if await cursor.fetchall() != [("ok",)]:
                     raise ValueError("Резервная копия повреждена")
             async with backup.execute("PRAGMA user_version") as cursor:
-                if (await cursor.fetchone())[0] != SCHEMA_VERSION:
+                source_version = (await cursor.fetchone())[0]
+                if source_version not in (1, SCHEMA_VERSION):
                     raise ValueError("Неподдерживаемая версия резервной копии")
-            for table, columns in {
+            tables = {
                 "settings": {"key", "value", "updated_at"},
                 "audit_logs": {"id", "event", "created_at"},
                 "sync_state": {"component", "cursor", "updated_at"},
-            }.items():
+            }
+            if source_version == 2:
+                tables.update(MESSAGE_COLUMNS)
+            for table, columns in tables.items():
                 async with backup.execute(f"PRAGMA table_info({table})") as cursor:
                     if not columns <= {row[1] for row in await cursor.fetchall()}:
                         raise ValueError("Неподходящая структура резервной копии")
-            async with self.connect() as target, aiosqlite.connect(safety) as emergency:
-                await target.backup(emergency)
-                await backup.backup(target)
+            async with backup.execute("PRAGMA foreign_key_check") as cursor:
+                if await cursor.fetchone() is not None:
+                    raise ValueError("Нарушены связи в резервной копии")
+            temporary = await asyncio.to_thread(tempfile.TemporaryDirectory, prefix="fptm-restore-")
+            try:
+                async with aiosqlite.connect(Path(temporary.name) / "staged.db") as staged:
+                    await backup.backup(staged)
+                    # Disable writes in the staging copy BEFORE it can replace the live DB.
+                    await staged.execute("DELETE FROM settings WHERE key='sending_enabled'")
+                    if source_version == 2:
+                        await staged.execute(
+                            "UPDATE outgoing_messages SET status='unknown', "
+                            "last_error='restored_snapshot' WHERE status IN ('queued','sending')"
+                        )
+                        await staged.execute("DELETE FROM reply_contexts")
+                    await staged.commit()
+                    async with self.connect() as target, aiosqlite.connect(safety) as emergency:
+                        await target.backup(emergency)
+                        await staged.backup(target)
+            finally:
+                await asyncio.to_thread(temporary.cleanup)

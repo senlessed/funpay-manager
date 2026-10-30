@@ -1,5 +1,29 @@
 # Проверки — 30.10.2026
 
+## История и очередь — 0.1.0.dev1
+
+Windows onefile/windowed EXE пересобран и прошёл smoke без ключей: **exit 0**.
+Размер: 56 249 815 байт. SHA256:
+`46dcf1e1b79f805c22452d543ee42226d9c6be94e47289f7dab8790850f2df98`.
+Окно отрендерено offscreen и визуально просмотрено: флажок opt-in и остальные
+элементы помещаются. Это не заменяет native tray/DPI/чистую Windows и живую доставку.
+`pip check`: No broken requirements found. Зависимостей в этом этапе не добавлялось.
+
+71 автономный тест проходит, ruff check/format проходят. Добавлены проверки
+миграции 1 → 2 и rollback DDL; истории/direction/дедупликации/изоляции аккаунта;
+повторных updates после restart; конкурентного claim/FIFO независимых чатов;
+sending после аварии; timeout→unknown, definite rejection→failed, ack→sent;
+отмены во время записи; TTL/cancel prompt; owner-only Telegram reply в DB;
+staged restore схем 1/2 с отключением записи и unknown для старой очереди;
+старых callback route_key после повторного использования local ID.
+
+Контракт записи проверен только с mock transport: новый remote ID и совпадение
+author/account/chat/text, старый ID, чужой чат, несколько кандидатов, плохой JSON,
+таймаут после POST и отказ preflight без POST. Вложения только маркируются типом.
+Реальных HTTP-запросов с ключами и сообщений покупателям в этом этапе не было.
+Фоновая синхронизация, автоматические уведомления о доставке, Topics, полноценный
+soak-run и чистые Windows остаются непроверенными/не реализованными.
+
 ## Рабочий бот и read-only FunPay
 
 Итоговый EXE onefile/windowed пересобран и прошёл smoke без ключей: **exit 0**.

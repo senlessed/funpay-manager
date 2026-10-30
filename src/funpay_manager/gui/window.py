@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         notice = QLabel(
             "Локальная Windows-основа · " + __version__ + "\n"
-            "Telegram-бот и чтение списка чатов FunPay. Ответы пока недоступны."
+            "Telegram: чаты, локальная история и очередь ответов. Отправка по умолчанию выключена."
         )
         notice.setWordWrap(True)
         layout.addWidget(notice)
@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         self.funpay_status = QLabel("Не настроен")
         self.funpay_status.setTextFormat(Qt.TextFormat.PlainText)
         form.addRow("FunPay", self.funpay_status)
-        self.funpay_button = QPushButton("Подключить FunPay (только чтение)")
+        self.funpay_button = QPushButton("Подключить FunPay")
         self.funpay_button.setEnabled(False)
         self.funpay_button.clicked.connect(self.show_funpay_setup)
         layout.addWidget(self.funpay_button)
@@ -84,6 +84,10 @@ class MainWindow(QMainWindow):
         self.reconnect.setEnabled(False)
         self.reconnect.clicked.connect(self.reconnect_telegram)
         layout.addWidget(self.reconnect)
+        self.sending = QCheckBox("Разрешить отправку сообщений из очереди в FunPay")
+        self.sending.setEnabled(False)
+        self.sending.toggled.connect(self.change_sending)
+        layout.addWidget(self.sending)
         self.dark = QCheckBox("Тёмная тема")
         self.dark.setEnabled(False)
         self.dark.toggled.connect(self.change_theme)
@@ -153,6 +157,7 @@ class MainWindow(QMainWindow):
                 "dark_theme": await self.storage.get_setting("dark_theme", False),
                 "binding": await self.storage.get_setting("telegram_binding"),
                 "funpay": await self.storage.get_setting("funpay_account"),
+                "sending": await self.storage.get_setting("sending_enabled", False),
             }
 
         self.backend.submit("initialize", prepare)
@@ -167,12 +172,14 @@ class MainWindow(QMainWindow):
             self.apply_theme(bool(result["dark_theme"]))
             self.binding = result["binding"]
             self.funpay_button.setEnabled(True)
+            self.sending.blockSignals(True)
+            self.sending.setChecked(bool(result["sending"]))
+            self.sending.blockSignals(False)
+            self.sending.setEnabled(result["funpay"] is not None and self.binding is not None)
             self.reconnect.setEnabled(self.binding is not None)
             account = result["funpay"]
             self.funpay_status.setText(
-                f"Сохранён аккаунт {account['username']} · только чтение"
-                if account
-                else "Не настроен"
+                f"Сохранён аккаунт {account['username']}" if account else "Не настроен"
             )
             self.setup_button.setEnabled(self.binding is None)
             self.telegram_status.setText(
@@ -185,7 +192,7 @@ class MainWindow(QMainWindow):
             self.backup_button.setEnabled(True)
             self.restore_button.setEnabled(True)
             self.status.setText(
-                "Локальные компоненты готовы. Синхронизация истории ещё недоступна."
+                "История обновляется при открытии чата. Фоновая синхронизация пока недоступна."
             )
             if self.first_run:
                 self.first_run = False
@@ -204,6 +211,16 @@ class MainWindow(QMainWindow):
             )
         elif name == "telegram-status":
             self.telegram_status.setText("Telegram: " + str(result))
+        elif name in ("sending-setting", "sending-state"):
+            self.sending.blockSignals(True)
+            self.sending.setChecked(bool(result))
+            self.sending.blockSignals(False)
+            self.sending.setEnabled(self.binding is not None)
+            self.status.setText(
+                "Отправка включена."
+                if result
+                else "Отправка приостановлена. Уже начатая операция может завершиться."
+            )
 
     def failed(self, message: str) -> None:
         if message.startswith("Ошибка операции telegram-setup-") or message.startswith(
@@ -213,6 +230,10 @@ class MainWindow(QMainWindow):
         self.centralWidget().setEnabled(True)
         self.status.setText(message)
         self.backup_button.setEnabled(self.initialized)
+        if "sending-setting" in message:
+            self.backend.submit(
+                "sending-state", lambda: self.storage.get_setting("sending_enabled", False)
+            )
 
     def refresh_startup(self) -> None:
         self.startup.blockSignals(True)
@@ -236,6 +257,34 @@ class MainWindow(QMainWindow):
         finally:
             self.startup.blockSignals(False)
 
+    def change_sending(self, enabled: bool) -> None:
+        if (
+            enabled
+            and QMessageBox.question(
+                self,
+                "Разрешить отправку?",
+                "Тексты в очереди будут отправляться покупателям FunPay.\n"
+                "После перезапуска очередь продолжит работу.\n"
+                "При неизвестном результате повтора нет.\n"
+                "Сетевая запись проверена только на mock/fixtures; живой FunPay ещё не проверен.\n"
+                "Разрешить отправку, включая уже ожидающие операции?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            self.sending.blockSignals(True)
+            self.sending.setChecked(False)
+            self.sending.blockSignals(False)
+            return
+        self.sending.setEnabled(False)
+
+        async def persist():
+            await self.services.set_sending(enabled)
+            return enabled
+
+        self.backend.submit("sending-setting", persist)
+
     def change_startup(self, enabled: bool) -> None:
         try:
             if enabled:
@@ -256,7 +305,8 @@ class MainWindow(QMainWindow):
             QMessageBox.question(
                 self,
                 "Восстановить базу?",
-                "Текущие настройки и история будут заменены выбранной копией.\n"
+                "Текущие настройки, история и очередь будут заменены выбранной копией.\n"
+                "Отправка после восстановления будет выключена.\n"
                 "Предварительно будет сохранена страховочная копия текущей базы.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -275,6 +325,7 @@ class MainWindow(QMainWindow):
             try:
                 await self.storage.restore(Path(source), safety)
             finally:
+                await self.storage.migrate()
                 if self.network_enabled:
                     await self.services.start_telegram()
             return safety
