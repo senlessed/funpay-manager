@@ -224,3 +224,53 @@ async def test_vault_failure_is_distinct_and_canonical_value_is_stored(tmp_path)
 def test_unknown_diagnostic_code_is_not_displayed():
     assert "sensitive" not in funpay_failure_text("sensitive arbitrary code")
     assert "unexpected" in funpay_failure_text("sensitive arbitrary code")
+
+
+async def test_profile_needs_full_page_while_chat_endpoints_need_ajax(monkeypatch):
+    calls = []
+
+    class Content:
+        def __init__(self, text):
+            self.text = text
+
+        async def iter_chunked(self, size):
+            yield self.text.encode()
+
+    class Response:
+        status = 200
+
+        def __init__(self, text):
+            self.content = Content(text)
+
+    class Session:
+        def __init__(self, **kwargs):
+            self.defaults = kwargs.get("headers", {})
+
+        @asynccontextmanager
+        async def request(self, method, url, **kwargs):
+            headers = {**self.defaults, **kwargs.get("headers", {})}
+            ajax = headers.get("X-Requested-With") == "XMLHttpRequest"
+            calls.append((method, url, ajax))
+            if url == "https://funpay.com/":
+                # Observed FunPay contract: AJAX omits the layout and app data.
+                text = "<main>Page fragment without identity</main>" if ajax else identity_html()
+            elif url.endswith("/runner/"):
+                assert ajax
+                text = json.dumps({"objects": [{"type": "chat_bookmarks", "data": {"html": ""}}]})
+            else:
+                assert "/chat/history?" in url and ajax
+                text = json.dumps({"chat": {"node": {"id": "1"}, "messages": []}})
+            yield Response(text)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    adapter = FunPayReadOnlyAdapter("test-only-key")
+    try:
+        assert await adapter.authenticate() == AccountInfo("42", "Продавец")
+        assert await adapter.get_chats() == []
+        assert await adapter.get_history("1") == []
+        assert [call[2] for call in calls] == [False, True, True]
+    finally:
+        await adapter.close()

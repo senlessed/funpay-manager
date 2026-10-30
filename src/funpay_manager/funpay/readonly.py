@@ -113,12 +113,21 @@ class FunPayReadOnlyAdapter:
                 cookies={"golden_key": self._key},
                 headers={
                     "User-Agent": "Mozilla/5.0 FunPayTelegramManager/0.1",
-                    "X-Requested-With": "XMLHttpRequest",
                 },
             )
         try:
             async with self._session.request(
-                method, "https://funpay.com" + path, data=data, allow_redirects=False
+                method,
+                "https://funpay.com" + path,
+                data=data,
+                allow_redirects=False,
+                # FunPay returns only a page fragment for AJAX requests. The
+                # homepage must include its layout/body data for authentication.
+                headers=(
+                    {"X-Requested-With": "XMLHttpRequest"}
+                    if path.startswith(("/runner/", "/chat/history"))
+                    else {"Accept": "text/html"}
+                ),
             ) as response:
                 if response.status in (401, 403):
                     raise FunPayAuthError(

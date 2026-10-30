@@ -3,7 +3,7 @@
 Статус на 30.10.2026: начальная Windows-основа, не публичный релиз.
 Документ различает реализованное ядро и целевую архитектуру. Чек-лист — в PLAN.md.
 
-Текущий этап 0.1.0.dev4: SQLite schema 4, MessageService, ограниченный SyncWorker,
+Текущий этап 0.1.0.dev5: SQLite schema 4, MessageService, ограниченный SyncWorker,
 notification outbox и Topics с отдельной очередью зеркал. Актуальные контракты — в
 [docs/MESSAGING.md](docs/MESSAGING.md), [docs/SYNC.md](docs/SYNC.md)
 и [docs/TOPICS.md](docs/TOPICS.md). Topics проверены на mocks, живые интеграции не проверены.

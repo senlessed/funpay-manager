@@ -1,3 +1,3 @@
 """FunPay Telegram Manager: local desktop application."""
 
-__version__ = "0.1.0.dev4"
+__version__ = "0.1.0.dev5"
