@@ -89,6 +89,17 @@ class LocalStorage:
         async with self.connect() as source, aiosqlite.connect(destination) as target:
             await source.backup(target)
 
+    async def claim_telegram_binding(self, binding: dict, before_commit=None) -> None:
+        """INSERT-only: a second setup cannot replace an existing owner."""
+        async with self.connect() as connection:
+            await connection.execute(
+                "INSERT INTO settings(key,value) VALUES ('telegram_binding',?)",
+                (json.dumps(binding),),
+            )
+            if before_commit:
+                await before_commit()
+            await connection.commit()
+
     async def restore(self, source: Path, safety: Path) -> None:
         """Validate first, preserve current DB, restore under the storage-wide lock.
 

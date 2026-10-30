@@ -14,6 +14,7 @@ dependencies = [
   "aiosqlite>=0.20,<1",
   "pydantic-settings>=2.7,<3",
   "keyring>=25,<26",
+  "aiogram>=3.13,<4",
 ]
 
 [project.optional-dependencies]

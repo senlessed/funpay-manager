@@ -59,8 +59,7 @@ def main() -> int:
     else:
         if not args.minimized or not window.tray.isVisible():
             window.show()
-        if not settings.database.exists():
-            QTimer.singleShot(0, window.show_first_run)
+        window.first_run = True
     backend.start()
     try:
         exit_code = app.exec()

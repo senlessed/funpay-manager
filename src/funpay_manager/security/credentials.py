@@ -7,12 +7,13 @@ class CredentialStore:
     SERVICE = "FunPayTelegramManager"
     NAMES = frozenset({"telegram_token", "funpay_session"})
 
-    def __init__(self):
+    def __init__(self, profile: str = "default"):
         if sys.platform != "win32":
             raise RuntimeError("Защищённое хранилище доступно только на Windows")
         from keyring.backends.Windows import WinVaultKeyring
 
         self.backend = WinVaultKeyring()
+        self.SERVICE = f"FunPayTelegramManager/{profile}"
 
     def set(self, name: str, value: str) -> None:
         if name not in self.NAMES or not value.strip():

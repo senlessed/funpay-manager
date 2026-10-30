@@ -1,5 +1,22 @@
 # Проверки — 30.10.2026
 
+## Telegram setup
+
+Итог: **32 passed**, ruff check/format и pip check проходят. Обновлённый
+onefile/windowed EXE собран и прошёл frozen smoke с кодом 0, размер 55 957 581 байт.
+SHA256: `5128d23f7d7bcac12005d32c2bc854eaf6a7bfa2627316d46ea2486b573daa9a`.
+GitHub Actions и подключение к реальному Telegram пока не проверены этим запуском.
+
+Добавлены тесты одноразовости/TTL/лимита кода, отсеивания bot/group/чужого chat ID,
+getMe/webhook с mock Bot, сохранения токена только в fake Vault, закрытия сессий,
+запрета повторного owner claim, rollback при отказе Vault, конкуренции двух storage
+и отмены во время polling. Настоящие токены, сообщения и Credential Manager не
+использовались. Мастер отрендерен offscreen и визуально проверен без секретов.
+
+Первый frozen smoke выявил отсутствующий ресурс SSL-политики управляемого Python.
+Сборщик теперь включает его при наличии в runtime, без отключения TLS validation.
+На обычном Python без этого файла дополнительные данные не включаются.
+
 ## Продолжение: автозапуск и восстановление
 
 После добавления HKCU автозапуска и restore: **20 passed**, ruff check и format

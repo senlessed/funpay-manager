@@ -10,7 +10,7 @@
 | aiosqlite | 0.22.1 | MIT, проверен установленный LICENSE |
 | pydantic-settings | 2.16.2 | MIT |
 | keyring | 25.7.0 | MIT, проверен установленный LICENSE |
-| aiogram | 3.31.0 | MIT; установлен для следующего этапа, не подключён |
+| aiogram | 3.31.0 | MIT; используется мастером Telegram |
 | PyInstaller | 6.22.3 | GPL с исключением для собранных приложений |
 | pytest / pytest-asyncio / ruff | 9.2.0 / 1.4.1 / 0.17.3 | MIT / Apache-2.0 / MIT |
 | FunPayAPI (не установлен) | upstream docs 1.1.0 | GPLv3, проверен upstream LICENSE |

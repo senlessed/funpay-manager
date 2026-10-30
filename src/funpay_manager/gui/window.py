@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -21,6 +21,7 @@ from funpay_manager import __version__
 from funpay_manager.app.autostart import Autostart
 from funpay_manager.app.config import Settings
 from funpay_manager.app.worker import BackendThread
+from funpay_manager.gui.telegram_setup import TelegramSetupDialog
 from funpay_manager.storage.database import LocalStorage
 
 
@@ -32,6 +33,9 @@ class MainWindow(QMainWindow):
         self.settings, self.storage, self.backend = settings, storage, backend
         self.exiting = False
         self.initialized = False
+        self.first_run = False
+        self.setup_dialog = None
+        self.binding = None
         self.setWindowTitle("FunPay Telegram Manager")
         self.resize(620, 500)
         content = QWidget()
@@ -42,14 +46,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         notice = QLabel(
             "Локальная Windows-основа · " + __version__ + "\n"
-            "Подключение аккаунтов и мастер настройки появятся на следующем этапе."
+            "Доступна настройка Telegram. Подключение FunPay — следующий этап."
         )
         notice.setWordWrap(True)
         layout.addWidget(notice)
         form = QFormLayout()
         for name, state in (
             ("FunPay", "Не подключён"),
-            ("Telegram", "Не подключён"),
             ("Синхронизация", "Недоступна до подключения аккаунтов"),
             ("Активные чаты", "Нет данных"),
             ("Автоподнятие", "Выключено · модуль ещё не реализован"),
@@ -59,6 +62,13 @@ class MainWindow(QMainWindow):
         self.database_status = QLabel("Подготовка…")
         form.addRow("Локальная база", self.database_status)
         layout.addLayout(form)
+        self.telegram_status = QLabel("Telegram: не настроен")
+        self.telegram_status.setTextFormat(Qt.TextFormat.PlainText)
+        form.addRow("Telegram", self.telegram_status)
+        self.setup_button = QPushButton("Настроить Telegram")
+        self.setup_button.setEnabled(False)
+        self.setup_button.clicked.connect(self.show_setup)
+        layout.addWidget(self.setup_button)
         self.dark = QCheckBox("Тёмная тема")
         self.dark.setEnabled(False)
         self.dark.toggled.connect(self.change_theme)
@@ -122,7 +132,10 @@ class MainWindow(QMainWindow):
     def initialize(self) -> None:
         async def prepare():
             await self.storage.migrate()
-            return await self.storage.get_setting("dark_theme", False)
+            return {
+                "dark_theme": await self.storage.get_setting("dark_theme", False),
+                "binding": await self.storage.get_setting("telegram_binding"),
+            }
 
         self.backend.submit("initialize", prepare)
 
@@ -131,13 +144,25 @@ class MainWindow(QMainWindow):
             self.initialized = True
             self.database_status.setText("Готова · SQLite WAL")
             self.dark.blockSignals(True)
-            self.dark.setChecked(bool(result))
+            self.dark.setChecked(bool(result["dark_theme"]))
             self.dark.blockSignals(False)
-            self.apply_theme(bool(result))
+            self.apply_theme(bool(result["dark_theme"]))
+            self.binding = result["binding"]
+            self.setup_button.setEnabled(self.binding is None)
+            self.telegram_status.setText(
+                f"Telegram: @{self.binding['username']} · владелец {self.binding['owner_id']}\n"
+                "Привязка сохранена; рабочий бот пока не запущен."
+                if self.binding
+                else "Telegram: не настроен"
+            )
             self.dark.setEnabled(True)
             self.backup_button.setEnabled(True)
             self.restore_button.setEnabled(True)
             self.status.setText("Локальные компоненты готовы. Аккаунты не подключены.")
+            if self.first_run:
+                self.first_run = False
+                if not self.binding:
+                    QTimer.singleShot(0, self.show_setup)
         elif name == "backup":
             self.backup_button.setEnabled(True)
             self.status.setText("Резервная копия сохранена: " + str(result))
@@ -151,6 +176,8 @@ class MainWindow(QMainWindow):
             )
 
     def failed(self, message: str) -> None:
+        if message.startswith("Ошибка операции telegram-setup-"):
+            return
         self.centralWidget().setEnabled(True)
         self.status.setText(message)
         self.backup_button.setEnabled(self.initialized)
@@ -188,6 +215,8 @@ class MainWindow(QMainWindow):
         self.refresh_startup()
 
     def restore(self) -> None:
+        if self.setup_dialog and self.setup_dialog.isVisible():
+            return
         source, _ = QFileDialog.getOpenFileName(self, "Резервная копия", "", "SQLite (*.db)")
         if not source:
             return
@@ -256,12 +285,10 @@ class MainWindow(QMainWindow):
         self.status.setText("Завершение фоновых задач…")
         self.backend.stop()
 
-    def show_first_run(self) -> None:
-        QMessageBox.information(
-            self,
-            "Первый запуск",
-            "Программа бесплатная и работает локально.\n"
-            "Эта версия содержит Windows-основу и диагностику SQLite.\n"
-            "Мастер подключения Telegram и FunPay пока не реализован.\n"
-            "Автоматизации будут работать только при запущенной программе.",
-        )
+    def show_setup(self) -> None:
+        if self.setup_dialog and self.setup_dialog.isVisible():
+            self.setup_dialog.raise_()
+            return
+        self.setup_dialog = TelegramSetupDialog(self.storage, self.backend, self)
+        self.setup_dialog.finished.connect(lambda _: self.initialize())
+        self.setup_dialog.show()
