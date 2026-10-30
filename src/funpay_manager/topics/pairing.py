@@ -1,10 +1,13 @@
+import logging
 import secrets
 import threading
 import time
 
 from funpay_manager.security.pairing import PairingChallenge
 
-from .permissions import validate_group
+from .permissions import pairing_failure, validate_group
+
+logger = logging.getLogger(__name__)
 
 
 class GroupPairing:
@@ -96,12 +99,13 @@ class GroupPairing:
         await self.notice(bot, binding["owner_id"], self.error)
         try:
             group = await validate_group(bot, message.chat.id, snapshot[0])
-        except Exception:
+        except Exception as error:
+            diagnostic = pairing_failure(error)
+            logger.warning("Group validation failed: %s", diagnostic.replace("\n", " | "))
             self.error = (
-                "Привязка не выполнена. Нужна закрытая группа с темами без публичного username, "
-                "геолокации и связанного канала. Вы и бот должны быть администраторами; "
-                "боту нужно право управления темами. "
-                "Код ещё можно использовать до истечения срока."
+                "Привязка не выполнена.\n"
+                + diagnostic
+                + "\nКод привязки остаётся действительным до истечения срока."
             )
             await self.notice(bot, binding["owner_id"], self.error, force=True)
             raise

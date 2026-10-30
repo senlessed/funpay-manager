@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 
 class TopicsSetupDialog(QDialog):
@@ -17,6 +17,12 @@ class TopicsSetupDialog(QDialog):
         self.setMinimumSize(580, 520)
         self.resize(620, 560)
         layout = QVBoxLayout(self)
+        content = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        layout = QVBoxLayout(content)
         help_text = QLabel(
             "Создайте отдельную закрытую супергруппу, включите темы и добавьте вашего бота.\n"
             "Назначьте бота администратором с правом управления темами;\n"

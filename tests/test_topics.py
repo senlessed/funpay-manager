@@ -5,8 +5,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import SendMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
+from aiogram.methods import GetChat, SendMessage
 
 from funpay_manager.funpay.adapter import AccountInfo, ChatInfo, Message
 from funpay_manager.messages.service import MessageService
@@ -14,7 +14,12 @@ from funpay_manager.storage.database import LocalStorage
 from funpay_manager.storage.messages import MessageRepository
 from funpay_manager.topics.manager import TopicManager, TopicNeedsAttention
 from funpay_manager.topics.pairing import GroupPairing
-from funpay_manager.topics.permissions import GroupPermissionError, validate_group
+from funpay_manager.topics.permissions import (
+    GroupLookupError,
+    GroupPermissionError,
+    pairing_failure,
+    validate_group,
+)
 from funpay_manager.topics.repository import queue_topic_message
 from funpay_manager.topics.worker import TopicMirrorService
 
@@ -97,13 +102,25 @@ async def setup(tmp_path, bound=True):
         ("linked_chat_id", -100222),
         ("is_forum", False),
         ("type", "group"),
+        ("location", NS(latitude=1, longitude=1)),
+        ("id", -100222),
     ],
 )
 async def test_group_must_be_closed_forum(field, value):
     client = bot()
     setattr(client.get_chat.return_value, field, value)
-    with pytest.raises(GroupPermissionError):
+    with pytest.raises(GroupPermissionError) as error:
         await validate_group(client, -100111, {"owner_id": 7, "bot_id": 77})
+    expected = {
+        "username": "public",
+        "active_usernames": "public",
+        "linked_chat_id": "linked",
+        "is_forum": "forum",
+        "type": "type",
+        "location": "location",
+        "id": "id",
+    }[field]
+    assert f"tg_group_{expected}" in pairing_failure(error.value)
 
 
 @pytest.mark.parametrize(
@@ -563,3 +580,82 @@ async def test_real_dispatcher_routes_addressed_group_command_to_pairing(tmp_pat
         assert all(call.args[0] == 7 for call in mock.send_message.await_args_list)
     finally:
         await client.session.close()
+
+
+@pytest.mark.parametrize("stage", ["chat", "owner", "bot"])
+@pytest.mark.parametrize("kind", ["network", "bad_request"])
+async def test_api_check_failure_identifies_stage_without_raw_response(stage, kind):
+    client = bot()
+    method = GetChat(chat_id=-100111)
+    error_type = TelegramNetworkError if kind == "network" else TelegramBadRequest
+    original = error_type(method=method, message="sensitive-token-or-response")
+    member = client.get_chat_member.side_effect
+    if stage == "chat":
+        client.get_chat.side_effect = original
+    else:
+
+        async def check(group_id, user_id, **kwargs):
+            if user_id == (7 if stage == "owner" else 77):
+                raise original
+            return await member(group_id, user_id, **kwargs)
+
+        client.get_chat_member.side_effect = check
+    with pytest.raises(GroupLookupError) as error:
+        await validate_group(client, -100111, {"owner_id": 7, "bot_id": 77})
+    text = pairing_failure(error.value)
+    assert f"tg_group_{stage}_{kind}" in text
+    assert "sensitive" not in text
+    assert not isinstance(error.value, GroupPermissionError)
+
+
+async def test_group_rate_limit_is_preserved_for_mirror_cooldown():
+    client = bot()
+    original = TelegramRetryAfter(
+        method=GetChat(chat_id=-100111), message="sensitive", retry_after=9
+    )
+    client.get_chat.side_effect = original
+    with pytest.raises(TelegramRetryAfter) as error:
+        await validate_group(client, -100111, {"owner_id": 7, "bot_id": 77})
+    assert error.value is original
+    assert "tg_group_rate_limit" in pairing_failure(original)
+    assert "sensitive" not in pairing_failure(original)
+
+
+async def test_actual_aiogram_chat_model_with_private_forum_passes():
+    from aiogram.types import ChatFullInfo
+
+    client = bot()
+    client.get_chat.return_value = ChatFullInfo.model_validate(
+        {
+            "id": -100111,
+            "type": "supergroup",
+            "title": "private",
+            "is_forum": True,
+            "accent_color_id": 0,
+            "max_reaction_count": 11,
+            "accepted_gift_types": {
+                "unlimited_gifts": False,
+                "limited_gifts": False,
+                "unique_gifts": False,
+                "premium_subscription": False,
+                "gifts_from_channels": False,
+            },
+        }
+    )
+    await validate_group(client, -100111, {"owner_id": 7, "bot_id": 77})
+
+
+async def test_pairing_reports_actual_failed_right_and_preserves_challenge(tmp_path):
+    storage, _, _, _, _, client, _ = await setup(tmp_path, bound=False)
+    pairing = GroupPairing(storage, asyncio.Event())
+    code = await pairing.begin()
+    client.get_chat_member.side_effect = lambda *args, **kwargs: NS(
+        status="administrator", can_manage_topics=False
+    )
+    with pytest.raises(GroupPermissionError):
+        await pairing.handle(client, group_message("/bindgroup@test_bot " + code))
+    assert "tg_group_manage_topics" in pairing.error
+    assert "администратор" in pairing.error
+    assert "управление темами: не подтверждено" in pairing.error
+    assert pairing.challenge.active
+    assert code not in client.send_message.await_args.args[1]
