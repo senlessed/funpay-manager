@@ -2,6 +2,8 @@ import asyncio
 
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
+from funpay_manager.storage.orders import OrdersRepository
+
 from .permissions import GroupPermissionError, validate_group
 from .repository import TopicRepository
 
@@ -15,6 +17,7 @@ class TopicManager:
         self.storage, self.messages, self.wake = storage, messages, wake
         self.repository = TopicRepository(storage)
         self._lock = asyncio.Lock()
+        self.orders = OrdersRepository(storage)
 
     async def configuration(self):
         group = await self.storage.get_setting("telegram_group")
@@ -51,7 +54,7 @@ class TopicManager:
             try:
                 topic = await bot.create_forum_topic(
                     group["group_id"],
-                    name=f"{chat['username'][:90]} · {chat['remote_id']}"[:128],
+                    name=await self.orders.title(chat),
                     request_timeout=20,
                 )
                 if topic.message_thread_id <= 1:

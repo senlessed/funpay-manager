@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 
+from funpay_manager.commerce_workers import AutoRaiseWorker, OrdersWorker
 from funpay_manager.funpay.messaging import FunPayMessagingAdapter
+from funpay_manager.funpay.raising import FunPayRaisingAdapter
 from funpay_manager.funpay.rate_limit import RequestGate
 from funpay_manager.funpay.readonly import FunPayReadOnlyAdapter, normalize_golden_key
 from funpay_manager.messages.service import MessageService
@@ -62,6 +64,16 @@ class ApplicationServices:
         self.sync.notification_wake = wake
         self.messages.notification_wake = wake
         self.messages.topic_authorizer = self.authorize_topic_operation
+        self.orders = OrdersWorker(
+            storage,
+            self.read_adapter,
+            self.topic_manager.wake,
+            lambda s: self.notify("orders-status", s),
+        )
+        self.raiser = AutoRaiseWorker(
+            storage, self.raising_adapter, lambda s: self.notify("raise-status", s)
+        )
+        self.orders_task = self.raise_task = None
 
     def vault(self):
         return self.vault_factory(profile=credential_profile(self.storage.path))
@@ -71,6 +83,13 @@ class ApplicationServices:
             await self._start_services()
 
     async def _start_services(self):
+        if self.orders_task is None or self.orders_task.done():
+            self.orders_task = asyncio.create_task(self.orders.run(), name="orders")
+        if self.raise_task is None or self.raise_task.done():
+            await self.raiser.repository.recover()
+            self.raise_task = asyncio.create_task(self.raiser.run(), name="auto-raise")
+        self.orders.wake.set()
+        self.raiser.wake.set()
         if self.topic_task is None or self.topic_task.done():
             await self.topic_manager.repository.recover()
             self.topic_task = asyncio.create_task(self.topic_worker.run(), name="telegram-topics")
@@ -122,6 +141,13 @@ class ApplicationServices:
             await self._stop_services()
 
     async def _stop_services(self):
+        for task in (self.orders_task, self.raise_task):
+            if task:
+                task.cancel()
+        await asyncio.gather(
+            *(t for t in (self.orders_task, self.raise_task) if t), return_exceptions=True
+        )
+        self.orders_task = self.raise_task = None
         for task in (self.sync_task, self.notification_task, self.topic_task):
             if task:
                 task.cancel()
@@ -245,6 +271,8 @@ class ApplicationServices:
             if cancelled is not None and cancelled.is_set():
                 raise RuntimeError("Подключение отменено")
             await self.storage.set_setting("sending_enabled", False)
+            await self.storage.set_setting("auto_raise_enabled", False)
+            await self.storage.set_setting("orders_enabled", True)
             try:
                 await asyncio.to_thread(self.vault().set, "funpay_session", key)
             except Exception as error:
@@ -291,3 +319,31 @@ class ApplicationServices:
                 return chats
             finally:
                 await adapter.close()
+
+    @asynccontextmanager
+    async def raising_adapter(self, expected_id):
+        key = await asyncio.to_thread(self.vault().get, "funpay_session")
+        if not key:
+            raise RuntimeError("No FunPay session")
+        adapter = FunPayRaisingAdapter(key)
+        adapter.request_gate = self.request_gate
+        try:
+            account = await adapter.authenticate()
+            if account.id != expected_id:
+                raise RuntimeError("Account mismatch")
+            yield adapter
+        finally:
+            await adapter.close()
+
+    async def load_raise_catalog(self):
+        account = await self.storage.get_setting("funpay_account")
+        if not account:
+            raise ValueError("FunPay not connected")
+        async with self.raising_adapter(account["id"]) as adapter:
+            categories = await adapter.categories()
+        await self.raiser.repository.catalog(account["id"], categories)
+        return {
+            "account_id": account["id"],
+            "rows": await self.raiser.repository.rows(account["id"]),
+            "enabled": await self.storage.get_setting("auto_raise_enabled", False),
+        }

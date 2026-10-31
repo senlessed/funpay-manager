@@ -48,7 +48,7 @@ async def test_v1_upgrade_preserves_settings(tmp_path):
     await storage.migrate()
     assert await storage.get_setting("theme") is True
     async with storage.connect() as db:
-        assert (await (await db.execute("PRAGMA user_version")).fetchone())[0] == 4
+        assert (await (await db.execute("PRAGMA user_version")).fetchone())[0] == 5
 
 
 async def test_confirm_can_upgrade_unsupported_history_from_concurrent_sync(tmp_path):

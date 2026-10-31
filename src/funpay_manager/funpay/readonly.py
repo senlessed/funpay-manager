@@ -99,6 +99,8 @@ class FunPayReadOnlyAdapter:
         self._csrf: str | None = None
         self._lock = asyncio.Lock()
         self.request_gate = None
+        self.home_html = ""
+        self.chat_peers = {}
 
     async def _request(self, method: str, path: str, data=None) -> str:
         if self.request_gate is not None:
@@ -125,7 +127,7 @@ class FunPayReadOnlyAdapter:
                 # homepage must include its layout/body data for authentication.
                 headers=(
                     {"X-Requested-With": "XMLHttpRequest"}
-                    if path.startswith(("/runner/", "/chat/history"))
+                    if path.startswith(("/runner/", "/chat/history", "/lots/raise"))
                     else {"Accept": "text/html"}
                 ),
             ) as response:
@@ -168,6 +170,7 @@ class FunPayReadOnlyAdapter:
         async with self._lock:
             html = await self._request("GET", "/")
             self.account, self._csrf = await asyncio.to_thread(parse_identity, html)
+            self.home_html = html
             return self.account
 
     async def get_chats(self) -> list[ChatInfo]:
@@ -202,6 +205,20 @@ class FunPayReadOnlyAdapter:
         if self._session:
             await self._session.close()
         self._key = ""
+        self.home_html = ""
+
+    async def get_orders(self):
+        from .commerce import parse_orders
+
+        text = await self._request("GET", "/orders/trade")
+        orders, more = await asyncio.to_thread(parse_orders, text)
+        self.orders_partial = more
+        if more:
+            text = await self._request("GET", "/orders/trade?state=paid")
+            paid, more = await asyncio.to_thread(parse_orders, text)
+            known = {o.id for o in orders}
+            orders.extend(o for o in paid if o.id not in known)
+        return orders, more
 
     async def get_history(self, chat_id: str):
         from .history import parse_messages
@@ -222,4 +239,10 @@ class FunPayReadOnlyAdapter:
                 items = node["messages"]
             except (ValueError, KeyError, TypeError) as error:
                 raise FunPayConnectionError("История недоступна") from error
+            name = node.get("node", {}).get("name", "")
+            import re
+
+            pair = re.fullmatch(r"users-([0-9]+)-([0-9]+)", name)
+            if pair and self.account.id in pair.groups():
+                self.chat_peers[chat_id] = pair[2] if pair[1] == self.account.id else pair[1]
             return await asyncio.to_thread(parse_messages, items, self.account.id, chat_id)

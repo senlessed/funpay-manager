@@ -24,6 +24,7 @@ from funpay_manager.app.config import Settings
 from funpay_manager.app.services import ApplicationServices
 from funpay_manager.app.worker import BackendThread
 from funpay_manager.gui.funpay_setup import FunPaySetupDialog
+from funpay_manager.gui.raising_setup import RaisingSetupDialog
 from funpay_manager.gui.telegram_setup import TelegramSetupDialog
 from funpay_manager.gui.topics_setup import TopicsSetupDialog
 from funpay_manager.storage.database import LocalStorage
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
         self.network_enabled = False
         self.funpay_dialog = None
         self.topics_dialog = None
+        self.raising_dialog = None
         self.services = ApplicationServices(storage, backend.completed.emit)
         self.setWindowTitle("FunPay Telegram Manager")
         self.resize(660, 680)
@@ -62,8 +64,13 @@ class MainWindow(QMainWindow):
         notice.setWordWrap(True)
         layout.addWidget(notice)
         form = QFormLayout()
-        for name, state in (("Автоподнятие", "Выключено · модуль ещё не реализован"),):
-            form.addRow(name, QLabel(state))
+        self.raise_status = QLabel("Выключено")
+        self.raise_status.setWordWrap(True)
+        self.raise_status.setTextFormat(Qt.TextFormat.PlainText)
+        form.addRow("Автоподнятие", self.raise_status)
+        self.orders_status = QLabel("Ожидание загрузки")
+        self.orders_status.setWordWrap(True)
+        form.addRow("Статусы заказов", self.orders_status)
         self.chat_count = QLabel("Нет данных")
         form.addRow("Чаты в доступном списке", self.chat_count)
         self.sync_status = QLabel("Ожидание запуска")
@@ -91,6 +98,21 @@ class MainWindow(QMainWindow):
         self.funpay_button.setEnabled(False)
         self.funpay_button.clicked.connect(self.show_funpay_setup)
         layout.addWidget(self.funpay_button)
+        self.raising_button = QPushButton("Настроить автоподнятие лотов…")
+        self.raising_button.setEnabled(False)
+        self.raising_button.clicked.connect(self.show_raising_setup)
+        layout.addWidget(self.raising_button)
+        self.orders_enabled = QCheckBox("Статусы заказов в темах и фильтрах чатов")
+        self.orders_enabled.setEnabled(False)
+        self.orders_enabled.toggled.connect(self.change_orders)
+        layout.addWidget(self.orders_enabled)
+        pause_raise = QPushButton("Остановить автоподнятие")
+        pause_raise.clicked.connect(
+            lambda: self.backend.submit(
+                "raise-pause", lambda: self.storage.set_setting("auto_raise_enabled", False)
+            )
+        )
+        layout.addWidget(pause_raise)
         self.setup_button = QPushButton("Настроить Telegram")
         self.setup_button.setEnabled(False)
         self.setup_button.clicked.connect(self.show_setup)
@@ -207,6 +229,8 @@ class MainWindow(QMainWindow):
                 "last_sync": float(last[0]) if last else None,
                 "group": await self.storage.get_setting("telegram_group"),
                 "topics_enabled": await self.storage.get_setting("topics_enabled", False),
+                "orders_enabled": await self.storage.get_setting("orders_enabled", True),
+                "auto_raise_enabled": await self.storage.get_setting("auto_raise_enabled", False),
             }
 
         self.backend.submit("initialize", prepare)
@@ -221,6 +245,16 @@ class MainWindow(QMainWindow):
             self.apply_theme(bool(result["dark_theme"]))
             self.binding = result["binding"]
             self.funpay_button.setEnabled(True)
+            self.raising_button.setEnabled(result["funpay"] is not None)
+            self.orders_enabled.blockSignals(True)
+            self.orders_enabled.setChecked(result["orders_enabled"])
+            self.orders_enabled.blockSignals(False)
+            self.orders_enabled.setEnabled(result["funpay"] is not None)
+            self.raise_status.setText(
+                "Включено · см. расписание категорий"
+                if result["auto_raise_enabled"]
+                else "Выключено"
+            )
             self.set_background_controls(result)
             if result["last_sync"]:
                 self.last_sync.setText(
@@ -283,6 +317,19 @@ class MainWindow(QMainWindow):
             )
         elif name == "telegram-status":
             self.telegram_status.setText("Telegram: " + str(result))
+        elif name == "orders-status":
+            self.orders_status.setText(str(result))
+            self.backend.submit(
+                "orders-state", lambda: self.storage.get_setting("orders_enabled", True)
+            )
+        elif name == "orders-state":
+            self.orders_enabled.blockSignals(True)
+            self.orders_enabled.setChecked(bool(result))
+            self.orders_enabled.blockSignals(False)
+        elif name == "raise-status":
+            self.raise_status.setText(str(result))
+        elif name == "raise-pause":
+            self.raise_status.setText("Выключено. Уже начатый запрос может завершиться.")
         elif name == "sync-status":
             if isinstance(result, dict):
                 self.sync_status.setText(result["message"])
@@ -554,3 +601,19 @@ class MainWindow(QMainWindow):
             await self.services.start_telegram()
 
         self.backend.submit("reconnect", reconnect)
+
+    def show_raising_setup(self):
+        if self.raising_dialog and self.raising_dialog.isVisible():
+            self.raising_dialog.raise_()
+            return
+        self.raising_dialog = RaisingSetupDialog(self.services, self.backend, self)
+        self.raising_dialog.finished.connect(lambda _: self.initialize())
+        self.raising_dialog.show()
+
+    def change_orders(self, enabled):
+        async def save():
+            await self.storage.set_setting("orders_enabled", enabled)
+            self.services.orders.wake.set()
+            self.services.topic_manager.wake.set()
+
+        self.backend.submit("orders-setting", save)

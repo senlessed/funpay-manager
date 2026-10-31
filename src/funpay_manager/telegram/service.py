@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.types import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
+from funpay_manager.storage.orders import STATUS_LABELS, OrdersRepository
 from funpay_manager.topics.permissions import GroupPermissionError
 from funpay_manager.topics.view import topic_screen
 from funpay_manager.utils.text import telegram_text
@@ -136,7 +137,8 @@ class TelegramBotService:
             "FunPay Telegram Manager\nTelegram: бот работает.\n"
             "Чаты и локальная история доступны после подключения FunPay.\n"
             "Отправка включается отдельно в окне Windows; по умолчанию выключена.\n"
-            "Topics подключаются отдельно в Windows. Заказы и поднятие пока недоступны."
+            "Статусы заказов — в названиях тем и фильтрах чатов.\n"
+            "Автоподнятие настраивается отдельно в Windows, по умолчанию выключено."
         )
 
     async def callback(self, query):
@@ -154,12 +156,10 @@ class TelegramBotService:
             return
         if self.messages and await self.message_callback(query, data):
             return
-        if data not in ("menu", "status") and not (
-            data.startswith("chats:")
-            and data[6:].isascii()
-            and data[6:].isdecimal()
-            and len(data) <= 10
-        ):
+        chat_match = re.fullmatch(
+            r"chats:(?:(all|paid|closed|refunded|unknown):)?([0-9]{1,5})", data
+        )
+        if data not in ("menu", "status") and not chat_match:
             await query.answer("Неизвестная кнопка")
             return
         await query.answer()
@@ -177,23 +177,50 @@ class TelegramBotService:
                     menu(),
                 )
             else:
-                page = min(int(data[6:]), max(0, (len(chats) - 1) // 5))
-                text = "Последние доступные чаты FunPay (до 50)\n"
+                filter_by = chat_match[1] or "all"
+                statuses = {}
+                if self.storage:
+                    account = await self.storage.get_setting("funpay_account")
+                    if account:
+                        statuses = await OrdersRepository(self.storage).statuses(account["id"])
+                if filter_by != "all":
+                    chats = [c for c in chats if statuses.get(c.local_id, "unknown") == filter_by]
+                page = min(int(chat_match[2]), max(0, (len(chats) - 1) // 5))
+                prefix = f"chats:{filter_by}:"
+                text = (
+                    "Доступные чаты · "
+                    + ("Все" if filter_by == "all" else STATUS_LABELS[filter_by])
+                    + "\n"
+                )
                 for chat in chats[page * 5 : page * 5 + 5]:
-                    text += f"\n{chat.username[:100]} · ID {chat.id}\n"
+                    label = STATUS_LABELS[statuses.get(chat.local_id, "unknown")]
+                    text += f"\n{label} · {chat.username[:100]} · ID {chat.id}\n"
                     text += (chat.last_message or "Без текста")[:350] + "\n"
                 if not chats:
                     text += "Чатов нет."
                 buttons = []
                 if page:
                     buttons.append(
-                        InlineKeyboardButton(text="←", callback_data=f"chats:{page - 1}")
+                        InlineKeyboardButton(text="←", callback_data=prefix + str(page - 1))
                     )
                 if (page + 1) * 5 < len(chats):
                     buttons.append(
-                        InlineKeyboardButton(text="→", callback_data=f"chats:{page + 1}")
+                        InlineKeyboardButton(text="→", callback_data=prefix + str(page + 1))
                     )
                 markup = InlineKeyboardMarkup(inline_keyboard=[buttons] if buttons else [])
+                markup.inline_keyboard.append(
+                    [
+                        InlineKeyboardButton(text="Все", callback_data="chats:all:0"),
+                        InlineKeyboardButton(text="Открытые", callback_data="chats:paid:0"),
+                        InlineKeyboardButton(text="Закрытые", callback_data="chats:closed:0"),
+                    ]
+                )
+                markup.inline_keyboard.append(
+                    [
+                        InlineKeyboardButton(text="Возвраты", callback_data="chats:refunded:0"),
+                        InlineKeyboardButton(text="Неизвестно", callback_data="chats:unknown:0"),
+                    ]
+                )
                 if self.messages:
                     markup.inline_keyboard[:0] = [
                         [
@@ -207,7 +234,7 @@ class TelegramBotService:
                     ]
                 markup.inline_keyboard.append(
                     [
-                        InlineKeyboardButton(text="Обновить", callback_data=f"chats:{page}"),
+                        InlineKeyboardButton(text="Обновить", callback_data=prefix + str(page)),
                         InlineKeyboardButton(text="Меню", callback_data="menu"),
                     ]
                 )

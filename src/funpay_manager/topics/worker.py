@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+import aiosqlite
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -143,6 +144,8 @@ class TopicMirrorService:
             self.wake.clear()
             try:
                 next_delay = await self.drain()
+                if next_delay is None:
+                    next_delay = await self.drain_titles()
                 delay = 5
             except GroupPermissionError:
                 await self.storage.set_setting("topics_enabled", False)
@@ -162,3 +165,59 @@ class TopicMirrorService:
                 except TimeoutError:
                     pass
                 self.wake.set()
+
+    async def drain_titles(self):
+        try:
+            group = await self.manager.configuration()
+        except GroupPermissionError:
+            return None
+        cooldown = await self.repository.cooldown(group)
+        if cooldown:
+            return cooldown
+        async with self.storage.connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT c.*,m.thread_id FROM chats c JOIN telegram_topic_mappings m "
+                "ON m.chat_id=c.id "
+                "WHERE c.account_id=? AND m.binding_key=? AND m.status='ready'",
+                (group["account_id"], group["binding_key"]),
+            ) as cursor:
+                chats = [dict(row) for row in await cursor.fetchall()]
+        for chat in chats:
+            name = await self.manager.orders.title(chat)
+            key = f"topic-title:{group['binding_key']}:{chat['id']}"
+            if await self.storage.get_setting(key) == name:
+                continue
+            token = await asyncio.to_thread(self.vault().get, "telegram_token")
+            bot = self.bot_factory(
+                token=token, default=DefaultBotProperties(link_preview_is_disabled=True)
+            )
+            try:
+                if (await bot.get_me(request_timeout=15)).id != group["bot_id"]:
+                    raise GroupPermissionError("Bot mismatch")
+                await validate_group(bot, group["group_id"], group)
+                if await self.manager.configuration() != group:
+                    raise GroupPermissionError("Group changed")
+                await self.repository.defer(group, 3.2)
+                try:
+                    await bot.edit_forum_topic(
+                        group["group_id"], chat["thread_id"], name=name, request_timeout=20
+                    )
+                except TelegramBadRequest as error:
+                    if "not modified" not in error.message.lower():
+                        if any(
+                            x in error.message.lower()
+                            for x in (
+                                "topic_deleted",
+                                "message thread not found",
+                                "topic_id_invalid",
+                            )
+                        ):
+                            await self.repository.set_state(chat["id"], "invalid")
+                            return 3.2
+                        raise
+                await self.storage.set_setting(key, name)
+                return 3.2
+            finally:
+                await bot.session.close()
+        return None

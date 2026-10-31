@@ -6,11 +6,12 @@ from pathlib import Path
 
 import aiosqlite
 
+from .commerce_schema import COMMERCE_COLUMNS, MIGRATION_5
 from .message_schema import MESSAGE_COLUMNS, MIGRATION_2
 from .sync_schema import MIGRATION_3, SYNC_COLUMNS
 from .topic_schema import MIGRATION_4, TOPIC_COLUMNS
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # Domain tables are added by their feature migrations, rather than empty placeholders.
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -76,6 +77,11 @@ class LocalStorage:
                         if statement.strip():
                             await connection.execute(statement)
                     await connection.execute("PRAGMA user_version=4")
+                if version < 5:
+                    for statement in MIGRATION_5.split(";"):
+                        if statement.strip():
+                            await connection.execute(statement)
+                    await connection.execute("PRAGMA user_version=5")
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -164,6 +170,11 @@ class LocalStorage:
                 async with backup.execute(f"PRAGMA table_info({table})") as cursor:
                     if not columns <= {row[1] for row in await cursor.fetchall()}:
                         raise ValueError("Неподходящая структура резервной копии")
+            if source_version >= 5:
+                for table, columns in {**COMMERCE_COLUMNS, "chats": {"buyer_id"}}.items():
+                    async with backup.execute(f"PRAGMA table_info({table})") as cursor:
+                        if not columns <= {row[1] for row in await cursor.fetchall()}:
+                            raise ValueError("Неподходящая структура commerce backup")
             async with backup.execute("PRAGMA foreign_key_check") as cursor:
                 if await cursor.fetchone() is not None:
                     raise ValueError("Нарушены связи в резервной копии")
@@ -176,7 +187,13 @@ class LocalStorage:
                     await staged.executemany(
                         "INSERT INTO settings(key,value) VALUES (?,'false') "
                         "ON CONFLICT(key) DO UPDATE SET value='false'",
-                        [("sync_enabled",), ("notifications_enabled",), ("topics_enabled",)],
+                        [
+                            ("sync_enabled",),
+                            ("notifications_enabled",),
+                            ("topics_enabled",),
+                            ("auto_raise_enabled",),
+                            ("orders_enabled",),
+                        ],
                     )
                     if source_version >= 2:
                         await staged.execute(
@@ -201,6 +218,14 @@ class LocalStorage:
                             "UPDATE telegram_topic_deliveries SET status='unknown',"
                             "last_error='restored_snapshot' "
                             "WHERE status IN ('queued','sending')"
+                        )
+                    if source_version >= 5:
+                        await staged.execute(
+                            "UPDATE lot_schedules SET enabled=0,status='unknown' "
+                            "WHERE status='sending'"
+                        )
+                        await staged.execute(
+                            "UPDATE raise_attempts SET status='unknown' WHERE status='sending'"
                         )
                     await staged.commit()
                     async with self.connect() as target, aiosqlite.connect(safety) as emergency:

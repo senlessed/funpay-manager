@@ -2,6 +2,7 @@ import asyncio
 
 from funpay_manager.funpay.messaging import NotSentError
 from funpay_manager.storage.messages import MessageRepository
+from funpay_manager.storage.orders import OrdersRepository
 
 
 class MessageService:
@@ -42,6 +43,11 @@ class MessageService:
                     try:
                         async with self.adapter_context(chat["account_id"]) as adapter:
                             messages = await adapter.get_history(chat["remote_id"])
+                        peers = getattr(adapter, "chat_peers", {})
+                        if isinstance(peers, dict):
+                            await OrdersRepository(self.storage).set_peer(
+                                local_id, chat["account_id"], peers.get(chat["remote_id"])
+                            )
                             await self.repository.save_history(
                                 local_id, chat["account_id"], chat["remote_id"], messages
                             )

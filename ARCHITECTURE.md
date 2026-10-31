@@ -3,7 +3,7 @@
 Статус на 30.10.2026: начальная Windows-основа, не публичный релиз.
 Документ различает реализованное ядро и целевую архитектуру. Чек-лист — в PLAN.md.
 
-Текущий этап 0.1.0.dev9: SQLite schema 4, MessageService, ограниченный SyncWorker,
+Текущий этап 0.1.0.dev10: SQLite schema 5, MessageService, ограниченный SyncWorker,
 notification outbox и Topics с отдельной очередью зеркал. Актуальные контракты — в
 [docs/MESSAGING.md](docs/MESSAGING.md), [docs/SYNC.md](docs/SYNC.md)
 и [docs/TOPICS.md](docs/TOPICS.md). Topics проверены на mocks, живые интеграции не проверены.
@@ -31,7 +31,10 @@ ReadOnlyAdapter по-прежнему не имеет записи; отдель
 только затем polling сохраняет offset. Контекст ответа хранится в DB, TTL 15 минут,
 истёкшие/отменённые prompts не маршрутизируются. Безопасное закрытие операции
 проверяет UUID и текущий account ID. Неподтверждённый remote ID не считается sent.
-Миграции 1 → 2 → 3 → 4 атомарны; копии схем 1–4 допускаются с последующей миграцией.
+Миграции 1 → 2 → 3 → 4 → 5 атомарны; копии схем 1–5 допускаются с последующей миграцией.
+
+В dev10 добавлены независимые OrdersWorker и AutoRaiseWorker, orders_cache,
+buyer_id у чатов, lot_schedules и raise_attempts. Детали: [docs/COMMERCE.md](docs/COMMERCE.md).
 
 ## 1. Windows и жизненный цикл
 

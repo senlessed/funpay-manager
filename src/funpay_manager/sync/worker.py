@@ -3,6 +3,7 @@ import random
 import time
 
 from funpay_manager.funpay.readonly import FunPayAuthError
+from funpay_manager.storage.orders import OrdersRepository
 
 from .repository import SyncRepository
 
@@ -31,6 +32,11 @@ class FunPaySyncWorker:
                     return None
                 try:
                     messages = await adapter.get_history(chat.id)
+                    peers = getattr(adapter, "chat_peers", {})
+                    if isinstance(peers, dict) and await OrdersRepository(self.storage).set_peer(
+                        chat.local_id, account.id, peers.get(chat.id)
+                    ):
+                        self.notification_wake.set()
                     if await self.repository.ingest(account.id, chat, messages):
                         self.notification_wake.set()
                 except FunPayAuthError:
@@ -76,6 +82,7 @@ class FunPaySyncWorker:
                 delay = self.interval if result is not False else min(delay * 2, 300)
             except FunPayAuthError:
                 await self.storage.set_setting("sync_enabled", False)
+                await self.storage.set_setting("auto_raise_enabled", False)
                 await self.storage.set_setting("sending_enabled", False)
                 self.state(
                     {
