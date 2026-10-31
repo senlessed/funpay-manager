@@ -26,6 +26,7 @@ from funpay_manager.app.worker import BackendThread
 from funpay_manager.gui.funpay_setup import FunPaySetupDialog
 from funpay_manager.gui.raising_setup import RaisingSetupDialog
 from funpay_manager.gui.telegram_setup import TelegramSetupDialog
+from funpay_manager.gui.templates_setup import TemplatesSetupDialog
 from funpay_manager.gui.topics_setup import TopicsSetupDialog
 from funpay_manager.storage.database import LocalStorage
 
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.funpay_dialog = None
         self.topics_dialog = None
         self.raising_dialog = None
+        self.templates_dialog = None
         self.services = ApplicationServices(storage, backend.completed.emit)
         self.setWindowTitle("FunPay Telegram Manager")
         self.resize(660, 680)
@@ -102,6 +104,10 @@ class MainWindow(QMainWindow):
         self.raising_button.setEnabled(False)
         self.raising_button.clicked.connect(self.show_raising_setup)
         layout.addWidget(self.raising_button)
+        self.templates_button = QPushButton("Шаблоны ответов…")
+        self.templates_button.setEnabled(False)
+        self.templates_button.clicked.connect(self.show_templates_setup)
+        layout.addWidget(self.templates_button)
         self.orders_enabled = QCheckBox("Статусы заказов в темах и фильтрах чатов")
         self.orders_enabled.setEnabled(False)
         self.orders_enabled.toggled.connect(self.change_orders)
@@ -246,6 +252,7 @@ class MainWindow(QMainWindow):
             self.binding = result["binding"]
             self.funpay_button.setEnabled(True)
             self.raising_button.setEnabled(result["funpay"] is not None)
+            self.templates_button.setEnabled(result["funpay"] is not None)
             self.orders_enabled.blockSignals(True)
             self.orders_enabled.setChecked(result["orders_enabled"])
             self.orders_enabled.blockSignals(False)
@@ -617,3 +624,10 @@ class MainWindow(QMainWindow):
             self.services.topic_manager.wake.set()
 
         self.backend.submit("orders-setting", save)
+
+    def show_templates_setup(self):
+        if self.templates_dialog and self.templates_dialog.isVisible():
+            self.templates_dialog.raise_()
+            return
+        self.templates_dialog = TemplatesSetupDialog(self.storage, self.backend, self)
+        self.templates_dialog.show()

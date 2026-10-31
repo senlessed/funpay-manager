@@ -9,9 +9,10 @@ import aiosqlite
 from .commerce_schema import COMMERCE_COLUMNS, MIGRATION_5
 from .message_schema import MESSAGE_COLUMNS, MIGRATION_2
 from .sync_schema import MIGRATION_3, SYNC_COLUMNS
+from .template_schema import MIGRATION_6, TEMPLATE_COLUMNS
 from .topic_schema import MIGRATION_4, TOPIC_COLUMNS
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # Domain tables are added by their feature migrations, rather than empty placeholders.
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -82,6 +83,11 @@ class LocalStorage:
                         if statement.strip():
                             await connection.execute(statement)
                     await connection.execute("PRAGMA user_version=5")
+                if version < 6:
+                    for statement in MIGRATION_6.split(";"):
+                        if statement.strip():
+                            await connection.execute(statement)
+                    await connection.execute("PRAGMA user_version=6")
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -175,6 +181,11 @@ class LocalStorage:
                     async with backup.execute(f"PRAGMA table_info({table})") as cursor:
                         if not columns <= {row[1] for row in await cursor.fetchall()}:
                             raise ValueError("Неподходящая структура commerce backup")
+            if source_version >= 6:
+                for table, columns in TEMPLATE_COLUMNS.items():
+                    async with backup.execute(f"PRAGMA table_info({table})") as cursor:
+                        if not columns <= {row[1] for row in await cursor.fetchall()}:
+                            raise ValueError("Неподходящая структура templates backup")
             async with backup.execute("PRAGMA foreign_key_check") as cursor:
                 if await cursor.fetchone() is not None:
                     raise ValueError("Нарушены связи в резервной копии")
@@ -226,6 +237,11 @@ class LocalStorage:
                         )
                         await staged.execute(
                             "UPDATE raise_attempts SET status='unknown' WHERE status='sending'"
+                        )
+                    if source_version >= 6:
+                        await staged.execute(
+                            "UPDATE template_previews SET status='cancelled' "
+                            "WHERE status IN ('draft','ready')"
                         )
                     await staged.commit()
                     async with self.connect() as target, aiosqlite.connect(safety) as emergency:
