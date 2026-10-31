@@ -10,6 +10,7 @@ from funpay_manager.topics.permissions import GroupPermissionError
 from funpay_manager.topics.view import topic_screen
 from funpay_manager.utils.text import telegram_text
 
+from .chat_tools import PrivateChatTools
 from .notification_view import notification_screen
 
 
@@ -17,6 +18,7 @@ def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💬 Чаты", callback_data="chats:0")],
+            [InlineKeyboardButton(text="🔎 Поиск чатов", callback_data="search")],
             [InlineKeyboardButton(text="🟢 Статус", callback_data="status")],
             [InlineKeyboardButton(text="📤 Очередь", callback_data="outbox")],
             [InlineKeyboardButton(text="🔔 Уведомления", callback_data="notifications")],
@@ -44,6 +46,7 @@ class TelegramBotService:
         self.bot = None
         self.messages, self.storage = messages, storage
         self.topics, self.group_pairing = topics, group_pairing
+        self.chat_tools = PrivateChatTools(storage, binding) if storage and messages else None
         self.dispatcher = Dispatcher()
         self.dispatcher.message.register(self.message)
         self.dispatcher.callback_query.register(self.callback)
@@ -90,6 +93,8 @@ class TelegramBotService:
             or not message.text
             or not message.text.strip()
         ):
+            return
+        if self.chat_tools and await self.chat_tools.message(self.bot, message):
             return
         if message.text.split(maxsplit=1)[0] in ("/start", "/menu", "/status", "/cancel"):
             if message.text.strip() == "/cancel" and self.messages:
@@ -139,6 +144,8 @@ class TelegramBotService:
         if not self.authorized(query.from_user, getattr(message, "chat", None)):
             return
         data = query.data or ""
+        if self.chat_tools and await self.chat_tools.callback(self.bot, query, data):
+            return
         if self.topics and await topic_screen(self.topics, self.bot, query, data):
             return
         if data == "notifications" and self.storage:
@@ -367,7 +374,13 @@ class TelegramBotService:
                             text="Тема", callback_data=f"topic:{local_id}:{route}"
                         ),
                     ],
-                    [InlineKeyboardButton(text="Чаты", callback_data="chats:0")],
+                    [
+                        InlineKeyboardButton(
+                            text="Заметка", callback_data=f"note:{local_id}:{route}"
+                        ),
+                        InlineKeyboardButton(text="Поиск", callback_data="search"),
+                        InlineKeyboardButton(text="Чаты", callback_data="chats:0"),
+                    ],
                 ]
             else:
                 return False
