@@ -7,6 +7,8 @@ import aiosqlite
 from funpay_manager.notifications.repository import queue_delivery
 from funpay_manager.topics.repository import queue_topic_message
 
+from .history import store_message
+
 
 class MessageRepository:
     def __init__(self, storage):
@@ -63,18 +65,8 @@ class MessageRepository:
                     if message.author_id == "-1"
                     else "incoming"
                 )
-                await db.execute(
-                    "INSERT INTO messages(chat_id,remote_id,author_id,text,kind,direction) "
-                    "VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id,remote_id) DO NOTHING",
-                    (
-                        local_id,
-                        message.id,
-                        message.author_id,
-                        message.text,
-                        message.kind,
-                        direction,
-                    ),
-                )
+                if await store_message(db, local_id, message, direction):
+                    await queue_topic_message(db, local_id, message, direction, repair=True)
             await db.commit()
 
     async def history(self, local_id: int, page: int = 0):
@@ -231,17 +223,17 @@ class MessageRepository:
     async def confirm(self, operation, message):
         async with self.storage.connect() as db:
             async with db.execute(
-                "SELECT author_id,text FROM messages WHERE chat_id=? AND remote_id=?",
+                "SELECT author_id,text,kind FROM messages WHERE chat_id=? AND remote_id=?",
                 (operation["chat_id"], message.id),
             ) as cursor:
                 existing = await cursor.fetchone()
-                if existing and existing != (message.author_id, message.text):
+                if existing and (
+                    existing[0] != message.author_id
+                    or existing[1] != message.text
+                    and existing[2] != "unsupported"
+                ):
                     raise ValueError("Remote ID conflicts with stored history")
-            await db.execute(
-                "INSERT INTO messages(chat_id,remote_id,author_id,text,kind,direction) "
-                "VALUES (?,?,?,?,?,'outgoing') ON CONFLICT(chat_id,remote_id) DO NOTHING",
-                (operation["chat_id"], message.id, message.author_id, message.text, message.kind),
-            )
+            await store_message(db, operation["chat_id"], message, "outgoing")
             cursor = await db.execute(
                 "UPDATE outgoing_messages SET status='sent',remote_message_id=?,"
                 "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "

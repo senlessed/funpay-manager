@@ -659,3 +659,65 @@ async def test_pairing_reports_actual_failed_right_and_preserves_challenge(tmp_p
     assert "управление темами: не подтверждено" in pairing.error
     assert pairing.challenge.active
     assert code not in client.send_message.await_args.args[1]
+
+
+async def test_repaired_history_edits_existing_placeholder_instead_of_duplicating(tmp_path):
+    storage, group, chats, messages, manager, client, _ = await setup(tmp_path)
+    chat = chats[0]
+    old = Message("12", "42", chat.id, "99", "", "unsupported")
+    await messages.repository.save_history(chat.local_id, "42", chat.id, [old])
+    async with storage.connect() as db:
+        await queue_topic_message(db, chat.local_id, old, "incoming")
+        await db.commit()
+    await worker(storage, manager, client).drain()
+    client.send_message.assert_awaited_once()
+    corrected = Message("12", "42", chat.id, "99", "Привет")
+    await messages.repository.save_history(chat.local_id, "42", chat.id, [corrected])
+    async with storage.connect() as db:
+        await db.execute("DELETE FROM sync_state WHERE component LIKE 'tg-topic-cooldown:%'")
+        await db.commit()
+    await worker(storage, manager, client).drain()
+    client.send_message.assert_awaited_once()
+    call = client.edit_message_text.await_args
+    assert "Привет" in call.args[0]
+    assert call.kwargs["message_id"] == 501
+    assert call.kwargs["chat_id"] == group["group_id"]
+    assert (await messages.repository.history(chat.local_id))[0]["kind"] == "text"
+    assert (await manager.repository.deliveries(chat.local_id, group))[0]["status"] == "sent"
+
+
+async def test_topic_success_is_quiet_and_failure_still_notifies(tmp_path):
+    storage, group, chats, messages, manager, client, _ = await setup(tmp_path)
+    await storage.set_setting("sending_enabled", True)
+    await manager.repository.attach(chats[0].local_id, group, 101)
+    await manager.handle_group(client, group_message("reply"), 100)
+    client.send_message.assert_not_awaited()
+    operation = await messages.repository.claim("42")
+    await messages.repository.confirm(operation, Message("12", "42", "1", "42", "reply"))
+    async with storage.connect() as db:
+        assert (await (await db.execute("SELECT count(*) FROM notifications")).fetchone())[0] == 0
+    await messages.enqueue_topic(chats[0].local_id, group, 501, 101, "second", 101)
+    operation = await messages.repository.claim("42")
+    await messages.repository.finish(operation["operation_id"], "unknown", error="unconfirmed")
+    async with storage.connect() as db:
+        assert (await (await db.execute("SELECT count(*) FROM notifications")).fetchone())[0] == 1
+
+
+async def test_repair_during_mirror_send_remains_queued_for_edit(tmp_path):
+    storage, group, chats, messages, manager, client, _ = await setup(tmp_path)
+    await queue_mirror(storage, chats[0])
+    event = await manager.repository.claim(group)
+    async with storage.connect() as db:
+        await db.execute(
+            "UPDATE telegram_topic_deliveries SET text=? WHERE id=?", ("corrected", event["id"])
+        )
+        await db.commit()
+    await manager.repository.finish(
+        event["id"],
+        "sent",
+        sent=NS(message_id=501),
+        group=group,
+        thread_id=101,
+        expected_text=event["text"],
+    )
+    assert (await manager.repository.deliveries(chats[0].local_id, group))[0]["status"] == "queued"

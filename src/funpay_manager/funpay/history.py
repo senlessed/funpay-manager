@@ -16,7 +16,7 @@ def parse_messages(items, account_id: str, chat_id: str) -> list[Message]:
             if not author.isascii() or not author.isdecimal() or len(author) > 32:
                 raise ValueError
             page = BeautifulSoup(item["html"], "html.parser")
-            text = page.select_one(".message-text" if author != "0" else ".alert")
+            text = page.select_one(".chat-msg-text, .message-text" if author != "0" else ".alert")
             if text:
                 for line_break in text.select("br"):
                     line_break.replace_with("\n")

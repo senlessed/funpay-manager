@@ -139,8 +139,3 @@ class TopicManager:
         await self.messages.enqueue_topic(
             local_id, group, message.message_id, message.message_thread_id, message.text, update_id
         )
-        await bot.send_message(
-            group["group_id"],
-            "[Служебно] Текст сохранён в очереди, это ещё не подтверждение доставки.",
-            message_thread_id=message.message_thread_id,
-        )

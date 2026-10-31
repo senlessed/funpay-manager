@@ -51,15 +51,33 @@ class TopicMirrorService:
                     posting = True
                     # Mark cooldown before the send so a crash/restart cannot burst a group.
                     await self.repository.defer(group, 3.2)
-                    sent = await bot.send_message(
-                        group["group_id"],
-                        event["text"],
-                        message_thread_id=thread_id,
-                        parse_mode=None,
-                        request_timeout=20,
-                    )
+                    mapped = await self.repository.mirror_mapping(event, group)
+                    if mapped:
+                        if mapped["thread_id"] != thread_id:
+                            raise TopicNeedsAttention("Mirror belongs to a previous topic")
+                        await bot.edit_message_text(
+                            event["text"],
+                            chat_id=group["group_id"],
+                            message_id=mapped["telegram_message_id"],
+                            parse_mode=None,
+                            request_timeout=20,
+                        )
+                        sent = None
+                    else:
+                        sent = await bot.send_message(
+                            group["group_id"],
+                            event["text"],
+                            message_thread_id=thread_id,
+                            parse_mode=None,
+                            request_timeout=20,
+                        )
                     await self.repository.finish(
-                        event["id"], "sent", sent=sent, group=group, thread_id=thread_id
+                        event["id"],
+                        "sent",
+                        sent=sent,
+                        group=group,
+                        thread_id=thread_id,
+                        expected_text=event["text"],
                     )
                     self.state("Сообщение доставлено в тему")
                 except TelegramRetryAfter as error:
@@ -79,6 +97,11 @@ class TopicMirrorService:
                     continue
                 except TelegramBadRequest as error:
                     problem = error.message.lower()
+                    if "message is not modified" in problem:
+                        await self.repository.finish(
+                            event["id"], "sent", expected_text=event["text"]
+                        )
+                        continue
                     missing = any(
                         marker in problem
                         for marker in (

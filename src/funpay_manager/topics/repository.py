@@ -7,7 +7,7 @@ from funpay_manager.notifications.repository import read_setting
 from funpay_manager.utils.text import telegram_text
 
 
-async def queue_topic_message(db, chat_id, message, direction, operation=None):
+async def queue_topic_message(db, chat_id, message, direction, operation=None, repair=False):
     group = await read_setting(db, "telegram_group")
     binding = await read_setting(db, "telegram_binding")
     if (
@@ -41,6 +41,19 @@ async def queue_topic_message(db, chat_id, message, direction, operation=None):
             (chat_id, message.id, group["binding_key"]),
         )
         return False
+    content = message.text if message.kind == "text" else f"[{message.kind}]"
+    text = telegram_text(
+        f"{'Покупатель' if direction == 'incoming' else 'Продавец'} · #{message.id}\n{content}"
+    )
+    if repair:
+        cursor = await db.execute(
+            "UPDATE telegram_topic_deliveries SET text=?,"
+            "status=CASE WHEN status='sent' THEN 'queued' ELSE status END "
+            "WHERE chat_id=? AND remote_message_id=? AND binding_key=? AND text<>?",
+            (text, chat_id, message.id, group["binding_key"], text),
+        )
+        # Only existing mirrors are corrected; do not backfill the silent baseline.
+        return cursor.rowcount > 0
     async with db.execute(
         "SELECT 1 FROM telegram_message_mappings WHERE chat_id=? AND "
         "remote_message_id=? AND binding_key=?",
@@ -48,10 +61,6 @@ async def queue_topic_message(db, chat_id, message, direction, operation=None):
     ) as cursor:
         if await cursor.fetchone():
             return False
-    content = message.text if message.kind == "text" else f"[{message.kind}]"
-    text = telegram_text(
-        f"{'Покупатель' if direction == 'incoming' else 'Продавец'} · #{message.id}\n{content}"
-    )
     cursor = await db.execute(
         "INSERT INTO telegram_topic_deliveries(delivery_key,chat_id,remote_message_id,"
         "binding_key,direction,text,status) VALUES (?,?,?,?,?,?,'queued') "
@@ -202,7 +211,15 @@ class TopicRepository:
             return dict(row) if row else None
 
     async def finish(
-        self, event_id, status, error=None, retry_at=0, sent=None, group=None, thread_id=None
+        self,
+        event_id,
+        status,
+        error=None,
+        retry_at=0,
+        sent=None,
+        group=None,
+        thread_id=None,
+        expected_text=None,
     ):
         async with self.storage.connect() as db:
             if sent and group:
@@ -229,7 +246,24 @@ class TopicRepository:
                 "WHERE id=? AND status='sending'",
                 (status, error, retry_at, event_id),
             )
+            if status == "sent" and expected_text is not None:
+                await db.execute(
+                    "UPDATE telegram_topic_deliveries SET status='queued' "
+                    "WHERE id=? AND status='sent' AND text<>?",
+                    (event_id, expected_text),
+                )
             await db.commit()
+
+    async def mirror_mapping(self, event, group):
+        async with self.storage.connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM telegram_message_mappings WHERE chat_id=? AND remote_message_id=? "
+                "AND binding_key=? AND source='mirror'",
+                (event["chat_id"], event["remote_message_id"], group["binding_key"]),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
 
     async def cooldown(self, group):
         async with self.storage.connect() as db:

@@ -47,6 +47,8 @@ async def queue_delivery(db, operation_id, status):
         )
     ):
         return
+    if row[5] == "topic" and status == "sent":
+        return  # Topic replies stay quiet on success; failures still notify the owner.
     labels = {
         "sent": "Доставка подтверждена",
         "failed": "Сообщение не отправлено",

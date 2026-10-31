@@ -120,3 +120,29 @@ def test_history_preserves_multiline_and_marks_media():
     assert rows[0].text == "a\nb <unsafe>"
     assert rows[1].author_id == "0"
     assert rows[2].kind == "image" and rows[2].text == ""
+
+
+def test_current_funpay_text_markup_with_and_without_author_header():
+    rows = parse_messages(
+        [
+            item(
+                2,
+                99,
+                '<div class="chat-msg-item chat-msg-with-head"><div class="media-user-name">'
+                'Name</div><div class="chat-msg-body"><div class="chat-msg-text">'
+                "Привет<br>ещё &amp; раз</div></div></div>",
+            ),
+            item(3, 42, '<div class="chat-msg-body"><div class="chat-msg-text">брат</div></div>'),
+        ],
+        "42",
+        "1",
+    )
+    assert [m.text for m in rows] == ["Привет\nещё & раз", "брат"]
+    assert all(m.kind == "text" for m in rows)
+
+
+async def test_current_markup_ack_unblocks_next_message_without_retry():
+    result = adapter()
+    result._request.return_value = response([item(html='<div class="chat-msg-text">reply</div>')])
+    assert (await result.send_text("1", "reply")).id == "2"
+    result._request.assert_awaited_once()

@@ -51,6 +51,18 @@ async def test_v1_upgrade_preserves_settings(tmp_path):
         assert (await (await db.execute("PRAGMA user_version")).fetchone())[0] == 4
 
 
+async def test_confirm_can_upgrade_unsupported_history_from_concurrent_sync(tmp_path):
+    storage, repo, chats, adapter, service = await setup(tmp_path)
+    await repo.save_history(
+        chats[0].local_id, "42", "1", [Message("12", "42", "1", "42", "", "unsupported")]
+    )
+    await enqueue(repo, chats[0])
+    operation = await repo.claim("42")
+    await repo.confirm(operation, Message("12", "42", "1", "42", "reply"))
+    assert (await repo.operations("42"))[0]["status"] == "sent"
+    assert (await repo.history(chats[0].local_id))[0]["text"] == "reply"
+
+
 async def test_history_dedup_direction_and_chat_isolation(tmp_path):
     storage, repo, chats, adapter, service = await setup(tmp_path)
     messages = [

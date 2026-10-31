@@ -245,7 +245,13 @@ class TelegramBotService:
                     label = (
                         "Закрыта владельцем, без повтора"
                         if operation["last_error"] == "closed_by_owner"
-                        else operation["status"]
+                        else {
+                            "queued": "Ожидает отправки",
+                            "sending": "Отправляется",
+                            "sent": "Доставлено",
+                            "failed": "Не отправлено",
+                            "unknown": "Доставка не подтверждена; следующие сообщения чата ожидают",
+                        }[operation["status"]]
                     )
                     text += f"\n#{operation['sequence']} · {label}\n{operation['text'][:180]}\n"
                     if operation["status"] in ("unknown", "queued") and len(buttons) < 3:
@@ -257,7 +263,10 @@ class TelegramBotService:
                                 )
                             ]
                         )
-                text += "\nunknown: результат неизвестен; проверьте сайт. Слепого повтора нет."
+                text += (
+                    "\nЕсли сообщение уже видно на FunPay, закройте его операцию без повтора. "
+                    "Следующее сообщение этого чата сможет отправиться."
+                )
                 if not operations:
                     text += "\nОчередь пуста."
                 navigation = []

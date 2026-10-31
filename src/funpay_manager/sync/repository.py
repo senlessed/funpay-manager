@@ -3,6 +3,7 @@ import time
 import aiosqlite
 
 from funpay_manager.notifications.repository import queue_event, read_setting
+from funpay_manager.storage.history import store_message
 from funpay_manager.storage.messages import MessageRepository
 from funpay_manager.topics.repository import queue_topic_message
 
@@ -99,18 +100,13 @@ class SyncRepository:
                     if message.author_id == "-1"
                     else "incoming"
                 )
-                await db.execute(
-                    "INSERT INTO messages(chat_id,remote_id,author_id,text,kind,direction) "
-                    "VALUES (?,?,?,?,?,?) ON CONFLICT(chat_id,remote_id) DO NOTHING",
-                    (
-                        chat.local_id,
-                        message.id,
-                        message.author_id,
-                        message.text,
-                        message.kind,
-                        direction,
-                    ),
-                )
+                repaired = await store_message(db, chat.local_id, message, direction)
+                if repaired:
+                    notifications += int(
+                        await queue_topic_message(
+                            db, chat.local_id, message, direction, repair=True
+                        )
+                    )
                 if message.id in new_ids and direction == "incoming":
                     content = message.text if message.kind == "text" else f"[{message.kind}]"
                     title = (

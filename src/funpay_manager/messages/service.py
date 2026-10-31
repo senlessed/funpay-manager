@@ -45,6 +45,8 @@ class MessageService:
                             await self.repository.save_history(
                                 local_id, chat["account_id"], chat["remote_id"], messages
                             )
+                        if self.notification_wake:
+                            self.notification_wake.set()
                         refreshed = True
                     except Exception:
                         pass  # Local history remains available during outages.
